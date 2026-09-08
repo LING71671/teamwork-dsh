@@ -6,6 +6,11 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Existing tag or commit to verify (empty uses this workflow ref)'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -14,8 +19,14 @@ jobs:
   test:
     runs-on: windows-latest
     timeout-minutes: 15
+    env:
+      # Hosted Windows defaults may use RUNNER~1 aliases. Workspace guards require canonical paths.
+      TEMP: ${{ runner.temp }}
+      TMP: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.ref }}
       - uses: actions/setup-node@v4
         with:
           node-version: '22.22.1'
