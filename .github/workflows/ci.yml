@@ -19,10 +19,6 @@ jobs:
   test:
     runs-on: windows-latest
     timeout-minutes: 15
-    env:
-      # Hosted Windows defaults may use RUNNER~1 aliases. Workspace guards require canonical paths.
-      TEMP: ${{ runner.temp }}
-      TMP: ${{ runner.temp }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -33,4 +29,8 @@ jobs:
           cache: npm
       - run: npm ci --registry=https://registry.npmjs.org
       - run: npm test
+        env:
+          # Hosted Windows defaults may use RUNNER~1 aliases. Workspace guards require canonical paths.
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
       - run: npm pack --dry-run
