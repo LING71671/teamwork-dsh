@@ -11,9 +11,11 @@
 - Original baseline snapshots and actual input-tree digest binding before execution. The baseline is retained across repairs and resumes.
 - Transactional artifact references, host-only paginated manifest/file reads, binary/UTF-8 byte preservation and exact baseline-to-candidate change manifests through `teamwork_inspect` and HTTP.
 - Read-only three-way integration planning against the recorded baseline, registered candidate/checkpoint and current configured project; host-only paginated HTTP/DSH inspection with stale-plan detection.
-- Conflict detection covers concurrent file/mode changes, ancestor replacement, directory deletion with user-added/modified children, protected descendants and case/Unicode aliases. No project writeback, journal or final integrated acceptance is implemented yet.
+- Conflict detection covers concurrent file/mode changes, ancestor replacement, directory deletion with user-added/modified children, protected descendants and case/Unicode aliases.
 - Source snapshot exclusions are now case-insensitive, including `.ENV.*` and `.NPMRC`; integration inspection uses the same filter without reading excluded contents.
-- 90 tests locally, including real DSH repair/pause chains, candidate recovery, artifact scope/path/tamper handling, input binding and integration preflight. Not part of v0.2.0-dev.1.
+- Internal integration engine with same-database SQLite journal/leases, cross-data-directory project reservations, retained original backups, exclusive file publication, final merged snapshots and independent command verification. It is not yet wired to Runtime dispatch or DSH control commands.
+- Integration file intent recovery tested with real child-process exits before durable acknowledgments, including saved originals and published replacements. Unknown final acceptance dispatch is quarantined; partial changes are never silently rolled back over user edits.
+- 112 tests locally, including real DSH repair/pause chains, candidate recovery, artifact scope/path/tamper handling, input binding, integration preflight and internal journal recovery. Not part of v0.2.0-dev.1.
 
 ## 0.2.0-dev.1 — 2026-09-08
 

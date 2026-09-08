@@ -29,7 +29,7 @@ npm ci --registry=https://registry.npmjs.org
 npm test
 ```
 
-`v0.2.0-dev.1` 有 35 项测试，当前 0.3 工作树有 90 项。`npm test` 会构建源码并执行测试，包括真实 DSH SDK/Cordis 的离线模型适配器集成测试；不需要 API key，也不验证真实模型的任务效果。
+`v0.2.0-dev.1` 有 35 项测试，当前 0.3 工作树有 112 项。`npm test` 会构建源码并执行测试，包括真实 DSH SDK/Cordis 的离线模型适配器集成测试，以及内部集成执行器的文件写入/进程退出恢复测试；不需要 API key，也不验证真实模型的任务效果。内部集成执行器尚未接入用户命令，当前插件仍不写回原项目。
 
 编辑 `examples/runtime.example.json` 中的绝对路径和 DSH 模型路由，按实际位置修改 `examples/host.cordis.patch.yml`。示例路径仅为占位，不会替换你的凭据。
 

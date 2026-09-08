@@ -5,6 +5,7 @@ import { Fault, terminal, type Run, type Event, type StartCommand, type CancelCo
   type BridgeCommand, type Phase, type VerificationPolicy, type Candidate, type WorkOrder, type ValidationResult,
   type PauseCommand, type ResumeCommand, type PauseContinuation, type RoundEvidence, type ArtifactDescriptor } from './contracts.js';
 import { activityPhase, evaluateGate, receive, transition, repairEligible, repairFeedback } from './kernel.js';
+import { IntegrationJournal } from './integration-journal.js';
 
 export const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
 function canonical(value: unknown): string {
@@ -22,6 +23,7 @@ function roundEvidence(run: Run): RoundEvidence {
 
 export class Store {
   private readonly db: DatabaseSync;
+  readonly integrations: IntegrationJournal;
   constructor(path: string) {
     this.db = new DatabaseSync(path);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA busy_timeout=5000;
@@ -35,6 +37,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS events (cursor INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id TEXT NOT NULL, revision INTEGER NOT NULL, type TEXT NOT NULL, at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS events_by_run ON events(run_id, cursor);`);
+    this.integrations = new IntegrationJournal(this.db);
   }
   close(): void { this.db.close(); }
   bindProfile(profile: unknown): void {
