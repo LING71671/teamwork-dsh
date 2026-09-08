@@ -1,0 +1,58 @@
+# Teamwork for DeepSeek Harness
+
+A portable teamwork orchestration runtime, with DeepSeek Harness (DSH) as its first integration.
+
+面向多种 Harness 的独立编排核心，优先接入 DSH。当前为 **0.2.0-dev.1 预发布版**，不是完整产品。
+
+本项目为独立实现，不是 DeepSeek 或 Google 的官方产品，也不包含其私有运行样本或内部提示词。
+
+## 当前能力
+
+- Host 工具：`teamwork_start`、`teamwork_status`、`teamwork_control`（取消）。
+- 独立 Runtime：SQLite 状态、幂等命令、dispatch outbox、可补读的 SSE 事件。
+- 每个 Attempt 使用独立工作副本、DSH SDK 进程和作用域凭证；支持超时与取消。
+- 可选验证：候选内容摘要 → 全新只读评审 → 独立验收命令 → 确定性 Gate。
+- 不自动改写原项目。`verified` 表示候选通过当前验收策略，不表示已集成。
+
+尚未实现：自动修复迭代、暂停/恢复、自动集成、产物下载、slash commands、OpenCode/Pi 适配。后续适配顺序为 DSH → OpenCode → Pi。
+
+## 从源码使用
+
+要求 Node.js >=22.13，当前测试基线为 Windows / Node.js 22.22.1。
+
+```sh
+git clone https://github.com/LING71671/teamwork-dsh.git
+cd teamwork-dsh
+git checkout v0.2.0-dev.1
+npm ci --registry=https://registry.npmjs.org
+npm test
+```
+
+`npm test` 会构建源码并执行 35 项测试，包括真实 DSH SDK/Cordis 的离线模型适配器集成测试；不需要 API key，也不验证真实模型的任务效果。
+
+编辑 `examples/runtime.example.json` 中的绝对路径和 DSH 模型路由，按实际位置修改 `examples/host.cordis.patch.yml`。示例路径仅为占位，不会替换你的凭据。
+
+```sh
+npm start -- --config examples/runtime.example.json --doctor
+npm start -- --config examples/runtime.example.json
+```
+
+在另一终端设置 `TEAMWORK_CONNECTION_FILE` 指向 Runtime 生成的 `connection.json`，再使用示例 patch 启动 DSH host。完整配置、验收示例、协议和限制见 [开发指南](DEVELOPMENT.md)。真正发起任务时，DSH 会使用你配置的模型服务，可能产生费用。
+
+## Release 安装包
+
+[Releases](https://github.com/LING71671/teamwork-dsh/releases) 提供编译后的 npm 格式 `.tgz` 和 SHA-256 校验文件。可在独立安装目录执行 `npm install /absolute/path/teamwork-dsh-plugin-0.2.0-dev.1.tgz`，然后使用 `npx teamwork-runtime --config /absolute/path/runtime.json`。宿主必须能够解析已安装的 `@teamwork/dsh-plugin/host`，或使用其绝对 `file://` 模块 URL。
+
+当前未发布到 npm registry；`private: true` 用于防止误发布，不影响本地 tarball 安装。源码和编译包均采用 [MIT 许可证](LICENSE)。
+
+## 安全与边界
+
+工作副本不是操作系统沙箱。只对合作式任务使用；当前不保证逃逸子进程回收，也不防御同一 OS 用户下的恶意进程。评审工具权限有限，但实现者 shell 与验收程序仍需操作者信任。
+
+不要提交 `connection.json`、环境凭据或运行状态。中断后的已派发进程无法证明退出时会进入 `blocked`，不会自动重派。请先阅读 [恢复与边界](DEVELOPMENT.md#恢复与边界)。
+
+## 开发与贡献
+
+核心位于 `contracts.ts` / `kernel.ts` / `store.ts` / `runtime.ts`；DSH 集中在 `driver-dsh.ts` 和 `plugin-dsh/`。提交改动前运行 `npm test`，协议变化应同步更新客户端、测试和文档。
+
+欢迎通过 Issues 报告问题或提交 Pull Request。请附版本、复现步骤和脱敏日志，不要上传令牌、真实会话内容或私有项目文件。版本记录见 [CHANGELOG](CHANGELOG.md)。

@@ -1,0 +1,34 @@
+{
+  "name": "@teamwork/dsh-plugin",
+  "version": "0.2.0-dev.1",
+  "description": "Portable teamwork runtime with DeepSeek Harness host and worker plugins",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/LING71671/teamwork-dsh.git" },
+  "homepage": "https://github.com/LING71671/teamwork-dsh#readme",
+  "bugs": { "url": "https://github.com/LING71671/teamwork-dsh/issues" },
+  "engines": { "node": ">=22.13.0" },
+  "exports": {
+    "./host": "./dist/src/plugin-dsh/host.js",
+    "./worker": "./dist/src/plugin-dsh/worker.js",
+    "./client": "./dist/src/client.js"
+  },
+  "bin": { "teamwork-runtime": "dist/src/cli.js" },
+  "files": ["dist/src", "examples", "DEVELOPMENT.md", "CHANGELOG.md"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "start": "node dist/src/cli.js"
+  },
+  "dependencies": {
+    "@deepseek-ai/cordis": "4.0.2",
+    "@deepseek-ai/dsh-sdk-client": "0.1.2-rc.1",
+    "@deepseek-ai/dsh-tools": "0.1.2-rc.1",
+    "zod": "3.25.76"
+  },
+  "devDependencies": {
+    "@types/node": "22.18.0",
+    "typescript": "5.9.2"
+  }
+}

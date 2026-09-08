@@ -1,0 +1,14 @@
+{
+  "workspace": "C:/work/your-project",
+  "dataDirectory": "C:/work/teamwork-runtime-data",
+  "port": 0,
+  "maxConcurrency": 1,
+  "attemptTimeoutMs": 600000,
+  "dsh": {
+    "dshBin": "C:/work/teamwork-dsh/node_modules/@deepseek-ai/dsh/lib/bin.js",
+    "profile": "sdk",
+    "patches": [],
+    "provider": "deepseek-official",
+    "model": "deepseek-v4-flash"
+  }
+}

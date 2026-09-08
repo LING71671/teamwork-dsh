@@ -1,0 +1,20 @@
+node_modules/
+dist/
+.teamwork/
+*.tgz
+.release/
+# Runtime credentials, local configuration and generated state must never be published.
+.env
+.env.*
+!.env.example
+.npmrc
+connection.json
+runtime.lock
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.local.json
+*.local.yml
+# Original research stays local pending a separate provenance review.
+/RESEARCH_NOTES.local.md
+/0[1-8]_*.md

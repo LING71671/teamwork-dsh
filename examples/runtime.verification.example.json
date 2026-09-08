@@ -1,0 +1,22 @@
+{
+  "workspace": "C:/work/teamwork-dsh/examples/verification-project",
+  "dataDirectory": "C:/work/teamwork-verification-data",
+  "port": 0,
+  "maxConcurrency": 1,
+  "attemptTimeoutMs": 600000,
+  "verification": {
+    "commands": [{
+      "id": "sum-acceptance",
+      "executable": "C:/Program Files/nodejs/node.exe",
+      "args": ["C:/work/teamwork-dsh/examples/sum-acceptance.mjs"],
+      "timeoutMs": 10000
+    }]
+  },
+  "dsh": {
+    "dshBin": "C:/work/teamwork-dsh/node_modules/@deepseek-ai/dsh/lib/bin.js",
+    "profile": "sdk",
+    "patches": [],
+    "provider": "deepseek-official",
+    "model": "deepseek-v4-flash"
+  }
+}

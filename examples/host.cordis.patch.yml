@@ -1,0 +1,6 @@
+# Set TEAMWORK_CONNECTION_FILE before launching the user-facing DSH process.
+# Use an absolute path to the compiled module; no tokens belong in this YAML.
+- insert:
+    - id: teamwork-host
+      name: 'file:///C:/work/teamwork-dsh/dist/src/plugin-dsh/host.js'
+      inject: [tools]
