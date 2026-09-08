@@ -2,12 +2,15 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { Store, digest } from './store.js';
 import { Fault, type Executor, type StartCommand, type CancelCommand, type Run,
-  type VerificationPolicy, type WorkOrder, type ValidationResult, type ControlCommand, type Candidate } from './contracts.js';
+  type VerificationPolicy, type WorkOrder, type ValidationResult, type ControlCommand, type Candidate,
+  type IntegrationPolicy, type IntegrateCommand, type IntegrationStatus, type AbandonIntegrationCommand } from './contracts.js';
 import { activityPhase } from './kernel.js';
 import { snapshot, treeDigest, inputsUnchanged } from './workspace.js';
 import { runOwned } from './owned-execution.js';
 import { validateCommand } from './validation.js';
 import { integrationPreview } from './integration-preview.js';
+import { IntegrationEngine } from './integration-engine.js';
+import { integrationRequest, integrationStatus } from './integration-journal.js';
 
 export interface RuntimeOptions {
   source: string;
@@ -16,6 +19,7 @@ export interface RuntimeOptions {
   attemptTimeoutMs: number;
   executionProfile: unknown;
   verification?: VerificationPolicy;
+  integration?: IntegrationPolicy;
 }
 interface Active { abort: AbortController; done: Promise<void> }
 
@@ -23,8 +27,14 @@ export class Runtime {
   private readonly active = new Map<string, Active>();
   private closing = false;
   private url = '';
-  constructor(readonly store: Store, private readonly executor: Executor, private readonly options: RuntimeOptions) {}
+  private activeIntegration: { id: string; abort: AbortController; done: Promise<void> } | undefined;
+  private readonly preparation = new Set<Promise<IntegrationStatus>>();
+  private readonly shutdown = new AbortController();
+  constructor(readonly store: Store, private readonly executor: Executor, private readonly options: RuntimeOptions) {
+    if (options.integration?.enabled && !options.verification) throw new Fault('CONFIG_INVALID', 'Integration requires verification commands');
+  }
   get verificationEnabled(): boolean { return this.options.verification !== undefined; }
+  get integrationEnabled(): boolean { return this.options.integration?.enabled === true; }
   get maxIterations(): number { return this.options.verification?.maxIterations ?? 1; }
   previewIntegration(id: string, artifactId: string | undefined, offset: number, limit: number, planId: string | undefined, signal: AbortSignal) {
     return integrationPreview(this.store, this.options.source, id, artifactId, offset, limit, planId, signal);
@@ -32,6 +42,7 @@ export class Runtime {
   connect(url: string): void {
     this.store.bindProfile({ source: this.options.source, attemptsDirectory: this.options.attemptsDirectory,
       executionProfile: this.options.executionProfile,
+      ...(this.integrationEnabled ? { integration: { enabled: true } } : {}),
       ...(this.options.verification ? { verification: this.options.verification } : {}) });
     this.url = url;
     this.store.recover();
@@ -39,6 +50,9 @@ export class Runtime {
   }
   start(input: StartCommand): Run {
     if (this.closing) throw new Fault('UNAVAILABLE', 'Runtime is shutting down or an owned process is unconfirmed', 503);
+    if (this.integrationEnabled && !this.activeIntegration && !this.store.integrations.pending().length && this.store.integrations.unresolved()) {
+      throw new Fault('INTEGRATION_RECONCILIATION_REQUIRED', 'Resolve the retained integration before starting more work');
+    }
     const run = this.store.start(input, this.options.attemptsDirectory, this.options.executionProfile, this.options.verification);
     queueMicrotask(() => this.pump());
     return run;
@@ -49,6 +63,12 @@ export class Runtime {
     return run;
   }
   control(id: string, input: ControlCommand): Run {
+    if (this.store.get(id).integration && input.type === 'cancel') {
+      const integration = this.store.get(id).integration!;
+      if (['prepared', 'applying', 'snapshotting', 'validating'].includes(integration.phase)) {
+        throw new Fault('INTEGRATION_CONTROL_REQUIRED', 'Cancel the integration using its own ID and revision');
+      }
+    }
     if (input.type === 'cancel') return this.cancel(id, input);
     if (input.type === 'resume') {
       if (this.closing) throw new Fault('UNAVAILABLE', 'Runtime is shutting down or an owned process is unconfirmed', 503);
@@ -61,8 +81,77 @@ export class Runtime {
     if (current.phase === 'pausing' && current.pause?.mode === 'interrupt') this.active.get(id)?.abort.abort();
     return run;
   }
+  async integrate(id: string, input: IntegrateCommand, signal: AbortSignal): Promise<IntegrationStatus> {
+    if (!this.integrationEnabled) throw new Fault('CAPABILITY_MISSING', 'Integration is disabled by the operator', 422);
+    if (this.closing) throw new Fault('UNAVAILABLE', 'Runtime is shutting down', 503);
+    const request = integrationRequest(id, input);
+    const old = this.store.integrations.replay(request);
+    if (old) return integrationStatus(old);
+    const task = new IntegrationEngine(this.store, this.options.source).prepare(id, input.expectedRevision, input.planId,
+      AbortSignal.any([signal, this.shutdown.signal]), request).then(record => {
+      queueMicrotask(() => this.pump()); return integrationStatus(record);
+    }).catch(error => {
+      // A concurrent identical request may have committed while this scan observed a changing
+      // project. Its durable receipt wins over this redundant preparation's read error.
+      const committed = this.store.integrations.replay(request);
+      if (committed) return integrationStatus(committed);
+      throw error;
+    });
+    this.preparation.add(task);
+    try { return await task; } finally { this.preparation.delete(task); }
+  }
+  integrationStatus(runId: string, id: string): IntegrationStatus {
+    const record = this.store.integrations.get(id);
+    if (record.runId !== runId) throw new Fault('NOT_FOUND', 'Integration is not in this run', 404);
+    return integrationStatus(record);
+  }
+  integrations(runId: string, offset: number, limit: number): { integrations: IntegrationStatus[]; nextOffset: number | null } {
+    this.store.get(runId);
+    const records = this.store.integrations.forRun(runId, offset, limit + 1);
+    return { integrations: records.slice(0, limit).map(integrationStatus), nextOffset: records.length > limit ? offset + limit : null };
+  }
+  cancelIntegration(runId: string, id: string, input: CancelCommand): IntegrationStatus {
+    const result = this.store.integrations.cancel(runId, id, input);
+    const current = this.store.integrations.get(id);
+    if (current.cancelRequested && this.activeIntegration?.id === id) this.activeIntegration.abort.abort();
+    queueMicrotask(() => this.pump());
+    return integrationStatus(result);
+  }
+  async abandonIntegration(runId: string, id: string, input: AbandonIntegrationCommand, signal: AbortSignal): Promise<IntegrationStatus> {
+    if (!this.integrationEnabled) throw new Fault('CAPABILITY_MISSING', 'Integration is disabled by the operator', 422);
+    if (this.closing) throw new Fault('UNAVAILABLE', 'Runtime is shutting down', 503);
+    const request = integrationRequest(runId, input, id);
+    const old = this.store.integrations.replay(request);
+    if (old) return integrationStatus(old);
+    if (this.activeIntegration?.id === id) throw new Fault('INTEGRATION_BUSY', 'Wait for the integration writer to stop');
+    const task = new IntegrationEngine(this.store, this.options.source).abandon(runId, id, input,
+      AbortSignal.any([signal, this.shutdown.signal])).then(record => { queueMicrotask(() => this.pump()); return integrationStatus(record); }).catch(error => {
+      const committed = this.store.integrations.replay(request);
+      if (committed) return integrationStatus(committed);
+      throw error;
+    });
+    this.preparation.add(task);
+    try { return await task; } finally { this.preparation.delete(task); }
+  }
   private pump(): void {
     if (this.closing || !this.url) return;
+    if (this.activeIntegration) return;
+    if (this.integrationEnabled) {
+      const pending = this.store.integrations.pending()[0];
+      if (pending) {
+        // Drain existing Attempts before touching the source; do not start new source snapshots
+        // or starve a pending integration with fresh worker dispatches.
+        if (this.active.size) return;
+        const record = this.store.integrations.claim(pending.id), abort = new AbortController();
+        const done = Promise.resolve().then(async () => {
+          await new IntegrationEngine(this.store, this.options.source).execute(record.id, abort.signal);
+        }).finally(() => { this.activeIntegration = undefined; this.pump(); });
+        this.activeIntegration = { id: record.id, abort, done };
+        void done.catch(() => { this.closing = true; });
+        return;
+      }
+      if (this.store.integrations.unresolved()) return;
+    }
     for (const id of this.store.pending()) {
       if (this.active.size >= this.options.maxConcurrency) break;
       if (this.active.has(id)) continue;
@@ -217,11 +306,14 @@ export class Runtime {
   }
   async close(): Promise<void> {
     this.closing = true;
+    this.shutdown.abort();
+    this.activeIntegration?.abort.abort();
     for (const [id, active] of this.active) {
       const run = this.store.get(id);
       if (['starting', 'running', 'freezing', 'reviewing', 'validating', 'verification_starting', 'pausing'].includes(run.phase)) this.store.move(id, 'stopping', 'Runtime shutdown');
       active.abort.abort();
     }
-    await Promise.all([...this.active.values()].map(a => a.done));
+    await Promise.allSettled([...this.preparation]);
+    await Promise.all([...this.active.values()].map(a => a.done).concat(this.activeIntegration ? [this.activeIntegration.done] : []));
   }
 }

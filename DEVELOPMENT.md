@@ -4,7 +4,7 @@
 
 已经实现：独立 Runtime、SQLite 状态/事件/命令去重/outbox、host 工具、worker checkpoint/submit、每 Attempt 一个 DSH SDK 进程、工作副本、取消与超时、SSE 事件补读、保守重启恢复、内容摘要绑定的 Candidate 快照、全新只读评审 Attempt、独立验收命令及确定性 Gate。
 
-尚未实现：自动集成、slash commands、OpenCode/Pi 适配。产物已有分页读取和变更清单，尚无批量压缩包导出。不会把未实现能力显示成成功。完整开发的剩余方向见 [ROADMAP.md](./ROADMAP.md)。
+已加入显式启用的集成、最终验收与有条件的保留当前文件处理。尚未实现：冲突解决工作项、slash commands、OpenCode/Pi 适配。产物已有分页读取和变更清单，尚无批量压缩包导出。不会把未实现能力显示成成功。完整开发的剩余方向见 [ROADMAP.md](./ROADMAP.md)。
 
 ## 开发和验证
 
@@ -16,7 +16,7 @@ npm ci --registry=https://registry.npmjs.org
 npm test
 ```
 
-目前有 74 项自动化测试。真实 DSH 集成测试覆盖单实现者、完整评审/Gate、四进程失败修复链，以及“checkpoint → 中断并确认退出 → 新实现者 → 新评审 → 验收”三进程恢复链；测试专用离线 LLM adapter 调用真实 `read`、`write`、`teamwork_checkpoint`、`teamwork_submit`。评审阶段故意尝试写入，验证 guard 拒绝，同时检查 session 身份、原目录未变。测试不发送网络模型请求、不需要 API key，不等同于真实模型效果验收。其他测试覆盖去重、身份/版本拒绝、候选篡改、负面评审、验收失败/超时/改写输入、迭代上限、旧轮结果、暂停竞态、取消、重载、SQLite 重开恢复、产物权限/路径/摘要与分页、原始基线和精确变更清单。
+目前有 124 项自动化测试。真实 DSH 测试覆盖单实现者、完整评审/Gate、四进程失败修复链，以及“checkpoint → 中断并确认退出 → 新实现者 → 新评审 → 验收”三进程恢复链；离线 LLM adapter 调用真实工具，不发送网络模型请求、不需要 API key。显式集成测试进一步将真实 DSH 的候选写回临时项目，保留期间新增的用户文件并重新验收。其他测试覆盖去重、身份/版本拒绝、候选篡改、失败/超时/输入改写、暂停竞态、重载、产物权限与分页、三方冲突、SQLite 恢复、真实子进程退出边界、取消和保留当前文件处理。这不等同于真实模型效果验收。
 
 测试只使用临时 DSH_HOME，不修改用户 DSH profile。测试生成的临时副本和状态在结束后清理。
 
@@ -34,7 +34,7 @@ npm start -- --config C:\work\teamwork-dsh\examples\runtime.example.json
 
 Runtime 输出 loopback 地址和 `connection.json` 路径，不输出令牌。第一次调用 start 才运行模型；DSH 会按所选 profile 使用已有凭据。启动 DSH 本身可能按其常规行为初始化缺失的 profile；本插件不修改全局模型选择，也不注册系统服务。
 
-一个数据目录只服务一个 workspace、固定执行 profile 和验收策略。更换 workspace/model/profile/verification 时使用新的数据目录，避免旧队列被派往新的目标。运行期间不要修改 profile/overlay 文件和外部验收脚本；当前摘要记录配置值，不对这些外部文件做内容冻结。
+一个数据目录只服务一个 workspace、固定执行 profile、验收策略和集成启用状态。更换 workspace/model/profile/verification 或启用 integration 时使用新的数据目录，避免旧队列被派往新的目标或改变原授权。运行期间不要修改 profile/overlay 文件和外部验收脚本；当前摘要记录配置值，不对这些外部文件做内容冻结。
 
 ## 启用独立评审与验收
 
@@ -78,14 +78,15 @@ dsh --profile web --patch C:\work\teamwork-dsh\examples\host.cordis.patch.yml
 
 示例 patch 使用 `file:///C:/.../host.js` 模块 URL。Windows 上不能把 `C:/...` 裸路径直接当作 ESM import specifier。移动项目后相应调整 patch。也可以在已完成安装的包中引用 `@teamwork/dsh-plugin/host`，但此开发版尚未发布到 npm。
 
-插件注册四个模型工具，不自动发起工作：
+插件注册五个模型工具，不自动发起工作：
 
 | 工具 | 输入 |
 |---|---|
 | `teamwork_start` | `commandId`、`objective` |
 | `teamwork_status` | `runId` |
 | `teamwork_control` | `runId`、`commandId`、`expectedRevision`、`type: "cancel" / "pause" / "resume"`；仅 pause 可带 `mode` |
-| `teamwork_inspect` | `runId`、`kind: "artifacts" / "manifest" / "file" / "changes"`，其他字段见下节 |
+| `teamwork_inspect` | `runId`、`kind: "artifacts" / "manifest" / "file" / "changes" / "integration" / "integrations"`，其他字段见下节 |
+| `teamwork_integrate` | `runId`、`commandId`、`expectedRevision`、`type: "integrate" / "cancel" / "abandon"`，计划/集成 ID 与决策字段见集成章节 |
 
 开始例子：`{"commandId":"fix-edge-001","objective":"修复边界行为并补充离线单元测试；不要安装依赖。"}`。保存返回的 runId；网络重试使用同一 commandId 和相同内容。取消前查询最新 revision。插件重载只重建连接，不启动第二个 Run。Runtime 重启会更新端口/令牌，随后重载 host 插件以重新读取连接文件。
 
@@ -117,6 +118,10 @@ host 与 Runtime 应一起更新；hello 会报告 `verificationEnabled`、`maxI
 | `GET /v1/runs/{runId}/artifacts/{artifactId}/file?path={relativePath}` | host；核对文件摘要并分页读取内容 |
 | `GET /v1/runs/{runId}/changes` | host；原始基线到当前或指定候选/暂停快照的精确变更清单 |
 | `GET /v1/runs/{runId}/integration-preview` | host；基线、候选和当前配置项目的只读三方冲突预览 |
+| `POST /v1/runs/{runId}/integrations` | host；显式集成，配置启用且当前候选通过 Gate 才接受 |
+| `GET /v1/runs/{runId}/integrations` | host；分页查询本 Run 的集成历史 |
+| `GET /v1/runs/{runId}/integrations/{integrationId}` | host；最新集成状态、最终验收、恢复目录与产物引用 |
+| `POST /v1/runs/{runId}/integrations/{integrationId}/commands` | host；cancel 或显式 abandon/保留当前文件 |
 | `POST /v1/attempts/{attemptId}/checkpoint` | 该 Attempt 独有凭证 |
 | `POST /v1/attempts/{attemptId}/submit` | 该 Attempt 独有凭证 |
 
@@ -144,19 +149,33 @@ worker 从进程环境绑定 epoch、inputDigest 和根 session ID，不允许�
 
 分页 offset/limit 与产物清单相同。首屏返回内容绑定的 id；继续请求时传相同 candidate.id 为 artifactId、相同 id 为 planId。普通项目内容或受保护路径集合变化会返回 `INTEGRATION_PLAN_STALE`，需从第一页重新检查。预览期间仍可能发生并发编辑，它不是原子文件系统快照；未来执行器还必须在串行事务中重新检查每个 effect，不能直接执行旧预览。最多 2 个并发检查、15 秒请求上限与现有产物读取共享。
 
-### 内部集成执行器（尚未接入用户命令）
+### 启用与发起集成
 
-源码中的 `IntegrationEngine` 已具备实际写回与最终验收路径，测试只在临时项目中调用它。Runtime 调度器、HTTP 控制命令和 DSH 插件目前**不会调用此执行器**，也不把这部分能力报告为可用的自动集成。尚需操作者显式启用配置、幂等命令、状态/事件、取消/恢复入口、集成产物登记与冲突解决工作项。
+默认不启用集成。操作者在新数据目录的 Runtime 配置中加入 `"integration": {"enabled": true}`，且必须配置 verification。完整示例见 `examples/runtime.integration.example.json`。hello 返回 integrationEnabled；只有启用时才报告 integrate、integration-cancel、integration-keep-current。配置启用只是允许显式命令，Gate 通过、插件加载和状态查询都不自动写回。
+
+用户授权写回后，先调用 `teamwork_inspect`（kind integration）取得 planId，即预览返回的 id；再调用 `teamwork_integrate`，例如 `{"runId":"...","commandId":"integrate-001","type":"integrate","expectedRevision":42,"planId":"<64位摘要>"}`。expectedRevision 是最新 **Run revision**，不是预览计划 ID 或集成 revision。HTTP 对应 POST integrations，省略 body 内 runId。模型不能提供目标目录、修改验收命令或跳过 Gate。重复/并发请求以同 commandId 和完全相同内容得到持久回执；回执是接受时的状态，不是最新执行状态。
+
+Runtime 等当前模型 Attempt 排空后串行集成，期间不派发新工作副本。GET Run 的 `integration` 显示最新集成，`teamwork_inspect`（kind integrations）分页查询历史。每次集成更新与 Run 投影、SSE 事件在同一 SQLite 事务中提交。**Run.phase 仍为 verified；只有 integration.phase 为 succeeded 才表示该次最终合并树通过验收。** 集成中的 prepared/applying/snapshotting/validating 不是成功，conflict/failed/blocked/abandoned 也不是。
+
+停止集成用 `teamwork_integrate` 的 type cancel，提供 integrationId 和最新 **Integration revision**。尚未 claim 的 prepared 可以 cancelled，不改项目；已在运行时先记录 cancelRequested 并等待执行器/直接验收进程停止，可能留下部分写入，随后进入 blocked。普通 teamwork_control 的 cancel 不会把仍在集成的 verified Run 当作已取消。集成失败或 blocked 会保留源目录租约，暂停新工作派发，等待处理。
+
+### 集成日志与最终验收
 
 内部 prepare 要求当前 Run 已 verified、Gate 通过、输入身份与候选登记一致，并提供当前 revision 和预览 planId。同一 SQLite 数据库保存 `integration_jobs`、`integration_events` 和 `integration_leases`；源目录租约阻止第二个未解决集成。项目父目录还创建排他 reservation 文件，防止不同数据目录的执行器同时操作同一项目；不会通过 PID 猜测或抢占未知拥有者。恢复调用者仍必须先持有 Runtime 数据目录的独占所有权。
 
 执行器在源目录同级创建唯一 `.teamwork-integration-<id>` 目录保存 owner、原文件备份、快照和验收副本。每个 effect 先持久化 intent，再操作文件，最后持久化 done。旧文件通过同卷 rename 保留到备份；新文件先复制并校验到暂存，再通过排他的 hardlink 原子发布，完成后移除暂存链接，使正常完成的目标不与暂存共享 inode。不会用 rename 覆盖目标，也不会在跨设备错误时改用“复制后删除”。删除目录只用非递归 rmdir，目录中新出现的用户文件会阻止删除。
 
-进程退出后，可按备份摘要、暂存摘要与发布身份核对未确认的文件 effect；不能证明的情况进入 blocked。原文件被移走之后若目标出现新用户文件，不覆盖新文件，也不把备份强行还原。已发生的部分写入、备份目录和 reservation 均保留供后续人工对账；失败不是“原项目未变”的承诺。目前没有用户可用的自动回滚或解除租约入口。
+进程退出后，Runtime 会继续已获授权的待派发集成，并按备份摘要、暂存摘要与发布身份核对未确认的文件 effect；不能证明的情况进入 blocked。旧的内部实验记录若未标记 host 授权，不会被自动派发。原文件被移走之后若目标出现新用户文件，不覆盖新文件，也不把备份强行还原。已发生的部分写入、备份目录和 reservation 均保留；失败不是“原项目未变”的承诺。不提供自动回滚。
 
 写入完成后，目标普通文件树必须等于“prepare 时的用户项目 + 候选变更”，包括用户原有的无关修改。独立冻结该最终合并树，再复制到另一个目录运行原验收命令；构建输出不写入项目/冻结快照，原始输入不能被验收改写。最终成功同时要求当前项目仍匹配合并树、快照摘要未变、每条命令都有当前结果且 exitCode 为 0。候选 Gate 通过而最终集成验收失败时，内部记录为 failed，并保留写入与备份，不冒充集成成功。
 
-验收 command intent 先于启动进程保存；若进程退出时没有持久结果，恢复进入 `EXTERNAL_STATE_UNKNOWN`，不自动重跑可能有外部副作用的命令。测试覆盖真实子进程在文件移动/发布与日志确认之间退出、在最终命令结果保存前退出、SQLite 重新打开，以及恢复时的用户改动和路径重定向。
+最终快照在验收前登记为 integrated 产物，可通过现有 manifest/file 接口检查；产物存在本身不代表验收通过。验收 command intent 先于启动进程保存；若没有持久结果或停止证据，恢复进入 `EXTERNAL_STATE_UNKNOWN`，不自动重跑可能有外部副作用的命令。正常取消得到直接进程退出确认后会持久化 commandStop，不把它当作通过的命令证据。测试覆盖真实子进程在文件移动/发布与日志确认之间退出、在最终命令结果保存前退出、SQLite 重新打开，以及恢复时的用户改动和路径重定向。
+
+### 人工选择保留当前文件
+
+用户明确选择放弃这次集成、保留当前项目时，可对已停止的 failed/blocked 集成调用 `teamwork_integrate`，type abandon，附 integrationId、最新 Integration revision、当前集成预览的 targetDigest 和非空 reason。此操作不重试、不回滚、不删除备份，也不表示任务成功。它仅在当前项目摘要仍匹配时释放**该次集成自己**的 reservation 和源租约，状态从 abandoning 到 abandoned，允许后续显式工作。
+
+退出未知的 commandIntent 不能用 abandon 清除，文字说明不能替代退出证据；仍在执行的 writer 也不能被 abandon。foreign reservation 不会被抢占或删除。决策和命令回执先持久化，释放 reservation 后发生进程退出可恢复完成，不重复改写项目。若期间用户又修改项目，报告过期并保留占用，需重新检查后提交新决策。恢复目录在 recoveryDirectory；备份仍保留供人工检查。未知进程的强证据对账、恢复/还原选项和冲突解决工作项仍待开发。
 
 这些保证针对合作式本地任务与进程崩溃，不是整棵树的原子事务、断电持久性保证或对抗同一 OS 用户恶意文件系统竞争的沙箱。Windows 权限依赖继承 ACL。原文件备份不会自动删除；后续需要独立的留存/清理策略。
 
@@ -182,7 +201,7 @@ worker 从进程环境绑定 epoch、inputDigest 和根 session ID，不允许�
 - 副本不是操作系统沙箱，复制期间也不是原目录的原子快照。DSH 自身的 sandbox/approval 策略仍然有效；只有显式配置了硬隔离，才有对应安全保证。
 - 实现者 guard 限制已知读写/搜索/shell/报告工具及 PTC 传输，拒绝其他工具和 `run_in_background`。评审者强制使用 native 工具呈现，只允许读/搜索/报告，禁止 shell、写入和代码执行。shell 和验收命令仍可能产生外部进程；本版本只确认所拥有的直接进程，不保证逃逸子进程的回收。
 - `connection.json` 是 host 管理凭证；不要提交到仓库或提供给模型。目录访问权限在 Windows 上依赖 ACL，Unix mode 不能代替 Windows ACL。该实现不防御同一 OS 用户下恶意进程读取文件或环境。
-- 内部集成执行器和文件 effect 恢复已开发并测试，但尚未接入 Runtime/DSH 用户控制链；自动集成、人工对账入口及完整首版发布门槛仍未完成。
+- 显式集成、最终验收、文件 effect 恢复和保留当前文件处理已接入 Runtime/DSH；未知进程强证据对账、冲突解决和完整首版发布门槛仍未完成。
 
 ## 源码边界
 

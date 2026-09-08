@@ -2,7 +2,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { timingSafeEqual } from 'node:crypto';
 import { ZodError } from 'zod';
 import { Runtime } from './runtime.js';
-import { Fault, protocolVersion, startSchema, controlSchema, bridgeSchema, pageSchema, filePageSchema, changePageSchema, integrationPageSchema } from './contracts.js';
+import { Fault, protocolVersion, startSchema, controlSchema, bridgeSchema, pageSchema, filePageSchema, changePageSchema, integrationPageSchema,
+  integrateSchema, cancelSchema, abandonIntegrationSchema } from './contracts.js';
 import { artifactManifest, artifactFile, artifactChanges } from './artifacts.js';
 
 async function body(req: IncomingMessage): Promise<unknown> {
@@ -67,14 +68,40 @@ export async function serve(runtime: Runtime, token: string, port = 0): Promise<
     }
     if (!equal(auth, token)) throw new Fault('UNAUTHORIZED', 'Invalid host credential', 401);
     if (req.method === 'GET' && url.pathname === '/v1/hello') {
-      json(res, 200, { protocolVersion, features: ['start', 'status', 'cancel', 'pause', 'resume', 'checkpoint', 'submit', 'events', 'review-gate', 'bounded-repair', 'candidate-recovery', 'artifacts', 'changes', 'integration-preview'],
+      json(res, 200, { protocolVersion, features: ['start', 'status', 'cancel', 'pause', 'resume', 'checkpoint', 'submit', 'events', 'review-gate', 'bounded-repair', 'candidate-recovery', 'artifacts', 'changes', 'integration-preview', 'integration-status',
+        ...(runtime.integrationEnabled ? ['integrate', 'integration-cancel', 'integration-keep-current'] : [])],
         verificationEnabled: runtime.verificationEnabled,
+        integrationEnabled: runtime.integrationEnabled,
         maxIterations: runtime.maxIterations,
         limitations: ['no-auto-integration', 'no-stdio-reattach', 'cooperative-isolation'] });
       return;
     }
     if (req.method === 'POST' && url.pathname === '/v1/runs') {
       json(res, 202, runtime.start(startSchema.parse(await body(req)))); return;
+    }
+    const integration = /^\/v1\/runs\/([a-zA-Z0-9_-]+)\/integrations(?:\/([a-zA-Z0-9_-]+)(\/commands)?)?$/.exec(url.pathname);
+    if (integration) {
+      const runId = integration[1]!, id = integration[2];
+      if (req.method === 'POST' && !id) {
+        const input = integrateSchema.parse(await body(req));
+        json(res, 202, await inspect(res, signal => runtime.integrate(runId, input, signal))); return;
+      }
+      if (req.method === 'POST' && id && integration[3]) {
+        const input = await body(req);
+        if (typeof input === 'object' && input !== null && 'type' in input && input.type === 'abandon') {
+          const command = abandonIntegrationSchema.parse(input);
+          json(res, 202, await inspect(res, signal => runtime.abandonIntegration(runId, id, command, signal))); return;
+        }
+        json(res, 202, runtime.cancelIntegration(runId, id, cancelSchema.parse(input))); return;
+      }
+      if (req.method === 'GET' && !integration[3]) {
+        if (id) { json(res, 200, runtime.integrationStatus(runId, id)); return; }
+        const query = Object.fromEntries(url.searchParams);
+        if (Object.keys(query).length !== [...url.searchParams].length) throw new Fault('SCHEMA_INVALID', 'Duplicate query parameters', 400);
+        const input = pageSchema.parse(query);
+        json(res, 200, runtime.integrations(runId, input.offset, input.limit)); return;
+      }
+      throw new Fault('NOT_FOUND', 'Unknown integration route', 404);
     }
     const preview = /^\/v1\/runs\/([a-zA-Z0-9_-]+)\/integration-preview$/.exec(url.pathname);
     if (preview && req.method === 'GET') {

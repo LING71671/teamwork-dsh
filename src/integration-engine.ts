@@ -2,10 +2,10 @@ import { constants } from 'node:fs';
 import { mkdir, lstat, realpath, readFile, writeFile, open, copyFile, rename, link, unlink, rmdir, readdir } from 'node:fs/promises';
 import { createHash, randomUUID } from 'node:crypto';
 import { dirname, join, relative, resolve } from 'node:path';
-import { Fault, type TreeEntry, type TreeManifest } from './contracts.js';
+import { Fault, type TreeEntry, type TreeManifest, type AbandonIntegrationCommand } from './contracts.js';
 import { Store } from './store.js';
 import { planIntegration } from './integration.js';
-import { type IntegrationEffect, type IntegrationRecord } from './integration-journal.js';
+import { type IntegrationEffect, type IntegrationRecord, type IntegrationRequest, integrationRequest } from './integration-journal.js';
 import { inside, snapshot, sourceManifest, treeManifest, inputsUnchanged } from './workspace.js';
 import { validateCommand } from './validation.js';
 
@@ -30,6 +30,7 @@ async function entryAt(root: string, path: string): Promise<TreeEntry | undefine
     if (!await exists(ancestor)) return undefined;
     await canonicalDirectory(ancestor);
   }
+
   let stat;
   try { stat = await lstat(target); } catch (error) { if (missing(error)) return undefined; throw error; }
   if (stat.isSymbolicLink() || relative(resolve(target), await realpath(target)) !== '') throw new Fault('INTEGRATION_PATH', 'Integration entry must not redirect');
@@ -45,12 +46,26 @@ function same(a: TreeEntry | undefined, b: TreeEntry | undefined): boolean {
   return a.kind === 'directory' ? b.kind === 'directory' : b.kind === 'file' && a.digest === b.digest && a.size === b.size && a.executable === b.executable;
 }
 
-/** Internal execution port, not yet exposed as a host command. Explicit prepare is the only entry;
+/** Explicit prepare is the only entry;
  * it requires a verified Run and a current preview ID. Nothing dispatches on plugin load. */
 export class IntegrationEngine {
   constructor(private readonly store: Store, private readonly source: string) {}
 
-  async prepare(runId: string, expectedRevision: number, expectedPlanId: string, signal: AbortSignal): Promise<IntegrationRecord> {
+  async abandon(runId: string, id: string, command: AbandonIntegrationCommand, signal: AbortSignal): Promise<IntegrationRecord> {
+    const record = this.store.integrations.get(id);
+    if (record.runId !== runId || relative(resolve(this.source), record.source) !== '') throw new Fault('NOT_FOUND', 'Integration is not in this run/source', 404);
+    const request = integrationRequest(runId, command, id), old = this.store.integrations.replay(request);
+    if (old) return old;
+    if (active.has(record.source)) throw new Fault('INTEGRATION_BUSY', 'Wait for the integration writer to stop');
+    if (record.commandIntent) throw new Fault('EXTERNAL_STATE_UNKNOWN', 'Final command exit/result is unproved');
+    const current = await sourceManifest(record.source, signal);
+    if (current.manifest.digest !== command.targetDigest) throw new Fault('INTEGRATION_PLAN_STALE', 'Current project differs from the keep-current decision');
+    signal.throwIfAborted();
+    return this.store.integrations.abandon(runId, id, command);
+  }
+
+  async prepare(runId: string, expectedRevision: number, expectedPlanId: string, signal: AbortSignal, request?: IntegrationRequest): Promise<IntegrationRecord> {
+    if (request) { const old = this.store.integrations.replay(request); if (old) return old; }
     const run = this.store.get(runId);
     if (run.revision !== expectedRevision) throw new Fault('REVISION_CONFLICT', 'Run revision changed');
     if (run.phase !== 'verified' || run.gate !== 'passed' || !run.verification || !run.baseline?.artifactId || !run.candidate?.artifactId) {
@@ -64,6 +79,8 @@ export class IntegrationEngine {
     const target = await sourceManifest(source, signal);
     const plan = planIntegration(before, after, target.manifest, target.protectedPaths);
     if (plan.id !== expectedPlanId) throw new Fault('INTEGRATION_PLAN_STALE', 'Project or candidate changed since preview');
+    if (request) { const old = this.store.integrations.replay(request); if (old) return old; }
+    signal.throwIfAborted();
     if (this.store.get(runId).revision !== expectedRevision) throw new Fault('REVISION_CONFLICT', 'Run changed during preparation');
     const id = randomUUID();
     // Sibling storage makes rename/link same-volume in the usual workspace layout. EXDEV fails
@@ -81,7 +98,8 @@ export class IntegrationEngine {
     additions.sort((a, b) => depth(a) - depth(b) || a.path.localeCompare(b.path));
     return this.store.integrations.create({ id, runId, revision: 0, gateInputDigest: run.order.inputDigest, source, directory, reservation,
       baseline: run.baseline, candidate: run.candidate, target: target.manifest, protectedPaths: target.protectedPaths, plan,
-      effects: [...removals, ...additions], commands: run.verification.commands, phase: plan.status === 'conflicts' ? 'conflict' : 'prepared', validation: [] });
+      effects: [...removals, ...additions], commands: run.verification.commands, phase: plan.status === 'conflicts' ? 'conflict' : 'prepared', validation: [],
+      ...(request ? { authorized: true, dispatch: 'pending' } : {}) }, request);
   }
 
   /** Caller holds Runtime ownership. Re-entry reconciles file intents, not unknown command processes.
@@ -90,10 +108,20 @@ export class IntegrationEngine {
     let record = this.store.integrations.get(id);
     if (relative(resolve(this.source), record.source) !== '') throw new Fault('INTEGRATION_IDENTITY', 'Integration belongs to another source');
     if (active.has(record.source)) throw new Fault('INTEGRATION_BUSY', 'Integration is already executing');
-    if (['conflict', 'blocked', 'failed'].includes(record.phase)) return record;
+    if (['conflict', 'blocked', 'failed', 'cancelled', 'abandoned'].includes(record.phase)) return record;
     active.add(record.source);
     try {
       if (record.phase === 'succeeded') { await this.release(record); return record; }
+      if (record.phase === 'abandoning') {
+        signal.throwIfAborted();
+        if (!record.resolution || record.commandIntent) throw new Fault('EXTERNAL_STATE_UNKNOWN', 'Keep-current requires stopped execution and a recorded decision');
+        if ((await sourceManifest(record.source, signal)).manifest.digest !== record.resolution.targetDigest) throw new Fault('INTEGRATION_PLAN_STALE', 'Project changed after the keep-current decision');
+        // Only relinquish this job's reservation. Keep project files, backups and snapshots intact.
+        await canonicalDirectory(dirname(record.reservation));
+        await this.release(record);
+        return this.update(record, 'integration.abandoned', r => ({ ...r, phase: 'abandoned' }));
+      }
+      if (record.cancelRequested) throw new Fault('ABORTED', 'Integration cancellation was requested');
       signal.throwIfAborted();
       await this.reserve(record);
       const run = this.store.get(record.runId);
@@ -146,7 +174,15 @@ export class IntegrationEngine {
           signal.throwIfAborted();
           const command = record.commands[i]!;
           record = this.update(record, 'integration.command_intent', r => ({ ...r, commandIntent: command.id }));
-          const result = await validateCommand(command, record.validationWorkspace!, signal);
+          const result = await validateCommand(command, record.validationWorkspace!, signal).catch(error => {
+            const exited = error instanceof Fault && error.code === 'ABORTED';
+            const notStarted = signal.aborted && error === signal.reason;
+            if (exited || notStarted) record = this.update(record, 'integration.command_stopped', r => {
+              delete r.commandIntent;
+              return { ...r, commandStop: { commandId: command.id, proof: exited ? 'direct-process-exited' : 'not-started' } };
+            });
+            throw error;
+          });
           record = this.update(record, 'integration.command_done', r => {
             delete r.commandIntent; r.validation.push(result); return r;
           });
@@ -173,7 +209,11 @@ export class IntegrationEngine {
   }
 
   private update(record: IntegrationRecord, type: string, body: (record: IntegrationRecord) => IntegrationRecord): IntegrationRecord {
-    return this.store.integrations.update(record.id, record.revision, type, body);
+    const current = this.store.integrations.get(record.id);
+    // The Runtime can persist cancellation while this writer is awaiting a filesystem effect.
+    // Preserve that control fact; all other unexpected writers still fail the revision check.
+    if (current.revision !== record.revision && !current.cancelRequested) throw new Fault('REVISION_CONFLICT', 'Integration changed during execution');
+    return this.store.integrations.update(record.id, current.revision, type, body);
   }
   private async reserve(record: IntegrationRecord): Promise<void> {
     await canonicalDirectory(record.source);

@@ -14,8 +14,9 @@ A portable teamwork orchestration runtime, with DeepSeek Harness (DSH) as its fi
 - 每个 Attempt 使用独立工作副本、DSH SDK 进程和作用域凭证；支持超时与取消。
 - 可选验证：候选内容摘要 → 全新只读评审 → 独立验收命令 → 确定性 Gate。
 - 不自动改写原项目。`verified` 表示候选通过当前验收策略，不表示已集成。
+- 0.3 可显式启用 `teamwork_integrate`：先预览并授权，再串行写回、保留备份并验收最终合并树；支持取消与有条件的“保留当前文件”处理。
 
-0.3 工作树还支持操作者配置的 1–5 轮有限修复和逐轮证据保留；默认只执行一轮。暂停提供 drain / interrupt；恢复使用新会话而非重新连接旧进程。尚未实现：自动集成、批量产物导出、slash commands、OpenCode/Pi 适配。完整开发方向见 [ROADMAP](ROADMAP.md)。后续适配顺序为 DSH → OpenCode → Pi。
+0.3 工作树还支持操作者配置的 1–5 轮有限修复和逐轮证据保留；默认只执行一轮。暂停提供 drain / interrupt；恢复使用新会话而非重新连接旧进程。集成默认关闭，必须配置 `integration.enabled: true` 并显式发起，示例见 `examples/runtime.integration.example.json`。尚未实现：冲突解决工作项、批量产物导出、slash commands、OpenCode/Pi 适配。完整开发方向见 [ROADMAP](ROADMAP.md)。后续适配顺序为 DSH → OpenCode → Pi。
 
 ## 从源码使用
 
@@ -29,7 +30,7 @@ npm ci --registry=https://registry.npmjs.org
 npm test
 ```
 
-`v0.2.0-dev.1` 有 35 项测试，当前 0.3 工作树有 112 项。`npm test` 会构建源码并执行测试，包括真实 DSH SDK/Cordis 的离线模型适配器集成测试，以及内部集成执行器的文件写入/进程退出恢复测试；不需要 API key，也不验证真实模型的任务效果。内部集成执行器尚未接入用户命令，当前插件仍不写回原项目。
+`v0.2.0-dev.1` 有 35 项测试，当前 0.3 工作树有 124 项。`npm test` 会构建源码并执行测试，包括真实 DSH SDK/Cordis 的离线模型适配器、显式集成到临时项目、保留用户改动、最终验收，以及进程退出恢复；不需要 API key，也不验证真实模型的任务效果。
 
 编辑 `examples/runtime.example.json` 中的绝对路径和 DSH 模型路由，按实际位置修改 `examples/host.cordis.patch.yml`。示例路径仅为占位，不会替换你的凭据。
 

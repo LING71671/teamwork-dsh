@@ -14,6 +14,12 @@ export const cancelSchema = z.object({
 export const pauseSchema = cancelSchema.extend({ type: z.literal('pause'), mode: z.enum(['drain', 'interrupt']).default('drain') });
 export const resumeSchema = cancelSchema.extend({ type: z.literal('resume') });
 export const controlSchema = z.discriminatedUnion('type', [cancelSchema, pauseSchema, resumeSchema]);
+export const integrationPolicySchema = z.object({ enabled: z.boolean() }).strict();
+export const integrateSchema = cancelSchema.extend({ type: z.literal('integrate'), planId: z.string().regex(/^[a-f0-9]{64}$/) });
+export const abandonIntegrationSchema = cancelSchema.extend({ type: z.literal('abandon'), targetDigest: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().trim().min(1).max(2000) });
+export type IntegrateCommand = z.infer<typeof integrateSchema>;
+export type AbandonIntegrationCommand = z.infer<typeof abandonIntegrationSchema>;
+export type IntegrationPolicy = z.infer<typeof integrationPolicySchema>;
 export const reportSchema = z.object({
   outcome: z.enum(['completed', 'incomplete']),
   summary: z.string().trim().min(1).max(16_000),
@@ -38,7 +44,7 @@ export const verificationSchema = z.object({
 export type VerificationPolicy = z.infer<typeof verificationSchema>;
 export interface Candidate { workspace: string; digest: string; artifactId?: string }
 export interface ArtifactDescriptor {
-  id: string; runId: string; kind: 'baseline' | 'candidate' | 'checkpoint'; digest: string; attemptId: string; createdAt: string;
+  id: string; runId: string; kind: 'baseline' | 'candidate' | 'checkpoint' | 'integrated'; digest: string; attemptId: string; createdAt: string;
 }
 export type TreeEntry = { path: string; kind: 'directory' } |
   { path: string; kind: 'file'; size: number; executable: number; digest: string };
@@ -70,6 +76,15 @@ export interface IntegrationPreview extends Omit<IntegrationPlan, 'changes'> {
   // A read-only preflight, never an authorization, lock, or final acceptance result.
   readOnly: true;
   changes: IntegrationChange[]; total: number; conflictCount: number; nextOffset: number | null;
+}
+export type IntegrationPhase = 'prepared' | 'applying' | 'snapshotting' | 'validating' | 'succeeded' | 'conflict' | 'blocked' | 'failed' | 'cancelled' | 'abandoning' | 'abandoned';
+export interface IntegrationStatus {
+  id: string; runId: string; revision: number; phase: IntegrationPhase; planId: string;
+  completedEffects: number; totalEffects: number; conflictCount: number;
+  cancelRequested: boolean; reason?: string; recoveryDirectory: string;
+  integrated?: Candidate; validation: ValidationResult[];
+  resolution?: { kind: 'keep-current'; targetDigest: string; reason: string };
+  commandStop?: { commandId: string; proof: 'not-started' | 'direct-process-exited' };
 }
 export const pageSchema = z.object({ offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
   limit: z.coerce.number().int().min(1).max(500).default(100) }).strict();
@@ -154,6 +169,7 @@ export interface Run {
   history?: RoundEvidence[];
   pause?: { mode: 'drain' | 'interrupt'; stage: Phase; continuation?: PauseContinuation };
   suspensions?: RoundEvidence[];
+  integration?: IntegrationStatus;
 }
 export interface Event {
   cursor: number;

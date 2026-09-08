@@ -29,14 +29,14 @@ export class FakeExecutor implements Executor {
     } };
   }
 }
-export async function setup(executor: Executor = new FakeExecutor(), attemptTimeoutMs = 5_000, verification?: VerificationPolicy) {
+export async function setup(executor: Executor = new FakeExecutor(), attemptTimeoutMs = 5_000, verification?: VerificationPolicy, integration = false) {
   const root = await mkdtemp(join(tmpdir(), 'teamwork-test-'));
   const source = join(root, 'source'), data = join(root, 'data');
   await mkdir(source); await mkdir(data);
   await writeFile(join(source, 'hello.txt'), 'original');
   const store = new Store(join(data, 'state.sqlite'));
   const runtime = new Runtime(store, executor, { source, attemptsDirectory: join(data, 'attempts'),
-    maxConcurrency: 2, attemptTimeoutMs, executionProfile: { driver: 'test' }, ...(verification ? { verification } : {}) });
+    maxConcurrency: 2, attemptTimeoutMs, executionProfile: { driver: 'test' }, ...(verification ? { verification } : {}), ...(integration ? { integration: { enabled: true } } : {}) });
   const token = randomBytes(32).toString('hex');
   const server = await serve(runtime, token);
   const client = new Client(server.url, token);

@@ -46,7 +46,7 @@ for (const verification of [false, true, 'repair', 'pause'] as const) test(`real
     id: 'readback', executable: process.execPath,
     args: ['-e', "require('node:assert').equal(require('node:fs').readFileSync('hello.txt','utf8'),'changed through real DSH tool')"],
     timeoutMs: 5_000,
-  }] } : undefined);
+  }] } : undefined, verification === true);
   try {
     const run = await f.client.start({ commandId: 'real-dsh', objective: 'Exercise offline plugin integration' });
     if (verification === 'pause') {
@@ -90,6 +90,22 @@ for (const verification of [false, true, 'repair', 'pause'] as const) test(`real
     assert.equal(settled.checkpoint?.summary, 'Offline DSH plugin integration exercise');
     assert.equal(await readFile(join(settled.order.workspace, 'hello.txt'), 'utf8'), 'changed through real DSH tool', diagnostic);
     assert.equal(await readFile(join(f.source, 'hello.txt'), 'utf8'), 'original');
+    if (verification === true) {
+      await writeFile(join(f.source, 'concurrent-user-file'), 'preserved by integration');
+      const preview = await f.client.previewIntegration(run.id);
+      const integration = await f.client.integrate(run.id, { commandId: 'integrate-real-dsh', type: 'integrate', planId: preview.id,
+        expectedRevision: (await f.client.status(run.id)).revision });
+      const integrated = await waitFor(() => {
+        const value = f.store.integrations.get(integration.id);
+        return ['succeeded', 'failed', 'blocked'].includes(value.phase) ? value : undefined;
+      }, 10_000);
+      assert.equal(integrated.phase, 'succeeded', JSON.stringify(integrated));
+      assert.equal(await readFile(join(f.source, 'hello.txt'), 'utf8'), 'changed through real DSH tool');
+      assert.equal(await readFile(join(f.source, 'concurrent-user-file'), 'utf8'), 'preserved by integration');
+      assert.equal(integrated.validation[0]!.status, 'passed');
+      assert.ok(integrated.integrated?.artifactId);
+      assert.equal(launched, 2); assert.equal(exited, 2); // Integration does not spawn a new model session.
+    }
   } finally {
     await f.cleanup();
     await rm(fixtureHome, { recursive: true, force: true });

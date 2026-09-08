@@ -11,7 +11,7 @@ import { Runtime } from './runtime.js';
 import { serve } from './server.js';
 import { acquire } from './ownership.js';
 import { inside } from './workspace.js';
-import { Fault, verificationSchema } from './contracts.js';
+import { Fault, verificationSchema, integrationPolicySchema } from './contracts.js';
 
 const absolute = z.string().refine(isAbsolute, 'Use an absolute path');
 const configSchema = z.object({
@@ -20,10 +20,11 @@ const configSchema = z.object({
   maxConcurrency: z.number().int().min(1).max(4).default(1),
   attemptTimeoutMs: z.number().int().min(1_000).max(3_600_000).default(600_000),
   verification: verificationSchema.refine(policy => policy.commands.every(c => isAbsolute(c.executable)), 'Acceptance executables must be absolute').optional(),
+  integration: integrationPolicySchema.optional(),
   dsh: z.object({ dshBin: absolute, profile: z.string().min(1).default('sdk'),
     patches: z.array(absolute).default([]), provider: z.string().min(1), model: z.string().min(1),
     dshHome: absolute.optional() }).strict(),
-}).strict();
+}).strict().refine(config => !config.integration?.enabled || !!config.verification, 'Integration requires verification');
 
 async function main(): Promise<void> {
   const { values } = parseArgs({ options: { config: { type: 'string' }, doctor: { type: 'boolean' } } });
@@ -56,6 +57,7 @@ async function main(): Promise<void> {
       source, attemptsDirectory: join(directory, 'attempts'), maxConcurrency: config.maxConcurrency,
       attemptTimeoutMs: config.attemptTimeoutMs, executionProfile: config.dsh,
       ...(config.verification ? { verification: config.verification } : {}),
+      ...(config.integration ? { integration: config.integration } : {}),
     });
     const token = process.env.TEAMWORK_HOST_TOKEN ?? randomBytes(32).toString('hex');
     server = await serve(runtime, token, config.port);

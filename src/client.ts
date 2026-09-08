@@ -1,5 +1,5 @@
 import { Fault, protocolVersion, type Run, type StartCommand, type CancelCommand, type BridgeCommand, type ControlCommand,
-  type ArtifactDescriptor, type ArtifactPage, type ArtifactFile, type ChangePage, type IntegrationPreview } from './contracts.js';
+  type ArtifactDescriptor, type ArtifactPage, type ArtifactFile, type ChangePage, type IntegrationPreview, type IntegrateCommand, type IntegrationStatus, type AbandonIntegrationCommand } from './contracts.js';
 
 export class Client {
   private readonly url: string;
@@ -52,6 +52,21 @@ export class Client {
   previewIntegration(id: string, artifactId?: string, offset = 0, limit = 100, planId?: string, signal?: AbortSignal): Promise<IntegrationPreview> {
     const query = new URLSearchParams({ offset: String(offset), limit: String(limit), ...(artifactId ? { artifactId } : {}), ...(planId ? { planId } : {}) });
     return this.request(`/v1/runs/${encodeURIComponent(id)}/integration-preview?${query}`, undefined, signal);
+  }
+  integrate(id: string, input: IntegrateCommand, signal?: AbortSignal): Promise<IntegrationStatus> {
+    return this.request(`/v1/runs/${encodeURIComponent(id)}/integrations`, input, signal);
+  }
+  integrations(id: string, offset = 0, limit = 100, signal?: AbortSignal): Promise<{ integrations: IntegrationStatus[]; nextOffset: number | null }> {
+    return this.request(`/v1/runs/${encodeURIComponent(id)}/integrations?offset=${offset}&limit=${limit}`, undefined, signal);
+  }
+  integration(id: string, integrationId: string, signal?: AbortSignal): Promise<IntegrationStatus> {
+    return this.request(`/v1/runs/${encodeURIComponent(id)}/integrations/${encodeURIComponent(integrationId)}`, undefined, signal);
+  }
+  cancelIntegration(id: string, integrationId: string, input: CancelCommand, signal?: AbortSignal): Promise<IntegrationStatus> {
+    return this.request(`/v1/runs/${encodeURIComponent(id)}/integrations/${encodeURIComponent(integrationId)}/commands`, input, signal);
+  }
+  abandonIntegration(id: string, integrationId: string, input: AbandonIntegrationCommand, signal?: AbortSignal): Promise<IntegrationStatus> {
+    return this.request(`/v1/runs/${encodeURIComponent(id)}/integrations/${encodeURIComponent(integrationId)}/commands`, input, signal);
   }
   bridge(id: string, kind: 'checkpoint' | 'submit', input: BridgeCommand, signal?: AbortSignal): Promise<{ accepted: true; runId: string; revision: number }> {
     return this.request(`/v1/attempts/${encodeURIComponent(id)}/${kind}`, input, signal);

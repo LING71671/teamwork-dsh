@@ -5,7 +5,7 @@ import { Fault, terminal, type Run, type Event, type StartCommand, type CancelCo
   type BridgeCommand, type Phase, type VerificationPolicy, type Candidate, type WorkOrder, type ValidationResult,
   type PauseCommand, type ResumeCommand, type PauseContinuation, type RoundEvidence, type ArtifactDescriptor } from './contracts.js';
 import { activityPhase, evaluateGate, receive, transition, repairEligible, repairFeedback } from './kernel.js';
-import { IntegrationJournal } from './integration-journal.js';
+import { IntegrationJournal, integrationStatus } from './integration-journal.js';
 
 export const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
 function canonical(value: unknown): string {
@@ -37,7 +37,15 @@ export class Store {
       CREATE TABLE IF NOT EXISTS events (cursor INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id TEXT NOT NULL, revision INTEGER NOT NULL, type TEXT NOT NULL, at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS events_by_run ON events(run_id, cursor);`);
-    this.integrations = new IntegrationJournal(this.db);
+    this.integrations = new IntegrationJournal(this.db, (record, type) => {
+      const row = this.db.prepare('SELECT data FROM runs WHERE id=?').get(record.runId);
+      if (!row) return record; // Internal journal fixtures may have no Run; host preparation never does.
+      const run = JSON.parse(row.data as string) as Run;
+      const updated = { ...run, revision: run.revision + 1, updatedAt: new Date().toISOString() };
+      if (record.integrated && !record.integrated.artifactId) record = { ...record, integrated: this.registerArtifact(updated, record.integrated, 'integrated') };
+      this.save({ ...updated, integration: integrationStatus(record) }, type);
+      return record;
+    });
   }
   close(): void { this.db.close(); }
   bindProfile(profile: unknown): void {

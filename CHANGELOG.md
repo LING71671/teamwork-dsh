@@ -13,9 +13,12 @@
 - Read-only three-way integration planning against the recorded baseline, registered candidate/checkpoint and current configured project; host-only paginated HTTP/DSH inspection with stale-plan detection.
 - Conflict detection covers concurrent file/mode changes, ancestor replacement, directory deletion with user-added/modified children, protected descendants and case/Unicode aliases.
 - Source snapshot exclusions are now case-insensitive, including `.ENV.*` and `.NPMRC`; integration inspection uses the same filter without reading excluded contents.
-- Internal integration engine with same-database SQLite journal/leases, cross-data-directory project reservations, retained original backups, exclusive file publication, final merged snapshots and independent command verification. It is not yet wired to Runtime dispatch or DSH control commands.
+- Integration engine with same-database SQLite journal/leases, cross-data-directory project reservations, retained original backups, exclusive file publication, final merged snapshots and independent command verification.
 - Integration file intent recovery tested with real child-process exits before durable acknowledgments, including saved originals and published replacements. Unknown final acceptance dispatch is quarantined; partial changes are never silently rolled back over user edits.
-- 112 tests locally, including real DSH repair/pause chains, candidate recovery, artifact scope/path/tamper handling, input binding, integration preflight and internal journal recovery. Not part of v0.2.0-dev.1.
+- Operator opt-in (`integration.enabled`, requiring verification), explicit `teamwork_integrate`/HTTP commands, durable command receipts, serial Runtime scheduling, cancellation, and authorized restart dispatch. Gate alone never triggers writeback.
+- Integration status and events project transactionally into Run state; final snapshots register as `integrated` artifacts. Run.phase remains verified; inspect Run.integration.phase for the independent integration outcome.
+- Explicit keep-current resolution for stopped failed integrations, with revision/target-digest checks, retained files/backups, owned-reservation-only release and durable recovery. Unknown command dispatch cannot be cleared by this decision.
+- 124 tests locally, including actual DSH output → explicit integration → final acceptance with user changes preserved, plus host tools, concurrent command retries, queued/active cancellation and keep-current recovery. Not part of v0.2.0-dev.1.
 
 ## 0.2.0-dev.1 — 2026-09-08
 

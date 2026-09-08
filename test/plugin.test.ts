@@ -21,7 +21,7 @@ test('host registers with real Cordis tools; reload removes old tools and never 
     let fiber = ctx.plugin(host);
     await waitFor(() => ctx.tools.get('teamwork_start'));
     assert.equal(f.store.all().length, 0);
-    assert.deepEqual(ctx.tools.schemas().map(s => s.name).sort(), ['teamwork_control', 'teamwork_inspect', 'teamwork_start', 'teamwork_status']);
+    assert.deepEqual(ctx.tools.schemas().map(s => s.name).sort(), ['teamwork_control', 'teamwork_inspect', 'teamwork_integrate', 'teamwork_start', 'teamwork_status']);
     const result = await ctx.tools.execute({ callId: 'host-call' as ToolExecutionInput['callId'],
       name: 'teamwork_start', arguments: { commandId: 'start', objective: 'fix' }, signal: new AbortController().signal });
     assert.equal(result.isError, false, JSON.stringify(result));
