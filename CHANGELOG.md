@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0-dev.1 — Unreleased
+
+- Opt-in bounded repair (1–5 total rounds) from the prior verified-digest candidate, with fresh attempts, credentials and incremented epochs.
+- Durable repair outbox, failed-round evidence history, bounded untrusted feedback, stale-result rejection and repair cancellation/restart handling.
+- No repair for integrity failures, missing evidence, stale review or acceptance spawn failures.
+- Protocol 0.3 advertises repair capability and configured budget. Old hosts must be updated alongside Runtime.
+- Drain/interrupt pause and explicit resume, preserving snapshots/checkpoints with fresh attempts and credentials; actual owned-exit confirmation before paused.
+- A stopped candidate and its verification outbox are committed together; queued verification resumes after SQLite reopen without repeating implementation. Ambiguous claimed processes remain blocked.
+- Original baseline snapshots and actual input-tree digest binding before execution. The baseline is retained across repairs and resumes.
+- Transactional artifact references, host-only paginated manifest/file reads, binary/UTF-8 byte preservation and exact baseline-to-candidate change manifests through `teamwork_inspect` and HTTP.
+- 74 tests locally, including real DSH repair/pause chains, candidate recovery, artifact scope/path/tamper handling and input binding. Not part of v0.2.0-dev.1.
+
 ## 0.2.0-dev.1 — 2026-09-08
 
 First public development prerelease. This is not the complete planned product.

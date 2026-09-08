@@ -21,7 +21,7 @@ test('host registers with real Cordis tools; reload removes old tools and never 
     let fiber = ctx.plugin(host);
     await waitFor(() => ctx.tools.get('teamwork_start'));
     assert.equal(f.store.all().length, 0);
-    assert.deepEqual(ctx.tools.schemas().map(s => s.name).sort(), ['teamwork_control', 'teamwork_start', 'teamwork_status']);
+    assert.deepEqual(ctx.tools.schemas().map(s => s.name).sort(), ['teamwork_control', 'teamwork_inspect', 'teamwork_start', 'teamwork_status']);
     const result = await ctx.tools.execute({ callId: 'host-call' as ToolExecutionInput['callId'],
       name: 'teamwork_start', arguments: { commandId: 'start', objective: 'fix' }, signal: new AbortController().signal });
     assert.equal(result.isError, false, JSON.stringify(result));
@@ -34,6 +34,21 @@ test('host registers with real Cordis tools; reload removes old tools and never 
     const status = await ctx.tools.execute({ callId: 'status-call' as ToolExecutionInput['callId'],
       name: 'teamwork_status', arguments: { runId: run.id }, signal: new AbortController().signal });
     assert.equal(status.isError, false, JSON.stringify(status));
+    await waitFor(() => f.store.get(run.id).baseline);
+    const pause = await ctx.tools.execute({ callId: 'pause-call' as ToolExecutionInput['callId'], name: 'teamwork_control',
+      arguments: { runId: run.id, commandId: 'pause', type: 'pause', mode: 'interrupt', expectedRevision: f.store.get(run.id).revision }, signal: new AbortController().signal });
+    assert.equal(pause.isError, false, JSON.stringify(pause));
+    await waitFor(() => f.store.get(run.id).phase === 'paused' ? true : undefined);
+    const inspect = await ctx.tools.execute({ callId: 'inspect-call' as ToolExecutionInput['callId'], name: 'teamwork_inspect',
+      arguments: { runId: run.id, kind: 'artifacts' }, signal: new AbortController().signal });
+    assert.equal(inspect.isError, false, JSON.stringify(inspect));
+    assert.match(JSON.stringify(inspect), /baseline/);
+    const resume = await ctx.tools.execute({ callId: 'resume-call' as ToolExecutionInput['callId'], name: 'teamwork_control',
+      arguments: { runId: run.id, commandId: 'resume', type: 'resume', expectedRevision: f.store.get(run.id).revision }, signal: new AbortController().signal });
+    assert.equal(resume.isError, false, JSON.stringify(resume));
+    await waitFor(() => f.store.get(run.id).phase === 'running' ? true : undefined);
+    assert.notEqual(f.store.get(run.id).order.attemptId, run.order.attemptId);
+    assert.equal(f.store.all().length, 1);
     await fiber.dispose();
   } finally {
     await ctx.fiber.dispose();

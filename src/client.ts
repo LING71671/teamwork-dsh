@@ -1,4 +1,5 @@
-import { Fault, protocolVersion, type Run, type StartCommand, type CancelCommand, type BridgeCommand } from './contracts.js';
+import { Fault, protocolVersion, type Run, type StartCommand, type CancelCommand, type BridgeCommand, type ControlCommand,
+  type ArtifactDescriptor, type ArtifactPage, type ArtifactFile, type ChangePage } from './contracts.js';
 
 export class Client {
   private readonly url: string;
@@ -29,7 +30,24 @@ export class Client {
   start(input: StartCommand, signal?: AbortSignal): Promise<Run> { return this.request('/v1/runs', input, signal); }
   status(id: string, signal?: AbortSignal): Promise<Run> { return this.request(`/v1/runs/${encodeURIComponent(id)}`, undefined, signal); }
   cancel(id: string, input: CancelCommand, signal?: AbortSignal): Promise<Run> {
+    return this.control(id, input, signal);
+  }
+  control(id: string, input: ControlCommand, signal?: AbortSignal): Promise<Run> {
     return this.request(`/v1/runs/${encodeURIComponent(id)}/commands`, input, signal);
+  }
+  artifacts(id: string, offset = 0, limit = 100, signal?: AbortSignal): Promise<{ artifacts: ArtifactDescriptor[]; nextOffset: number | null }> {
+    return this.request(`/v1/runs/${encodeURIComponent(id)}/artifacts?offset=${offset}&limit=${limit}`, undefined, signal);
+  }
+  artifact(id: string, artifactId: string, offset = 0, limit = 100, signal?: AbortSignal): Promise<ArtifactPage> {
+    return this.request(`/v1/runs/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(artifactId)}?offset=${offset}&limit=${limit}`, undefined, signal);
+  }
+  artifactFile(id: string, artifactId: string, path: string, offset = 0, length = 16_384, signal?: AbortSignal): Promise<ArtifactFile> {
+    const query = new URLSearchParams({ path, offset: String(offset), length: String(length) });
+    return this.request(`/v1/runs/${encodeURIComponent(id)}/artifacts/${encodeURIComponent(artifactId)}/file?${query}`, undefined, signal);
+  }
+  changes(id: string, artifactId?: string, offset = 0, limit = 100, signal?: AbortSignal): Promise<ChangePage> {
+    const query = new URLSearchParams({ offset: String(offset), limit: String(limit), ...(artifactId ? { artifactId } : {}) });
+    return this.request(`/v1/runs/${encodeURIComponent(id)}/changes?${query}`, undefined, signal);
   }
   bridge(id: string, kind: 'checkpoint' | 'submit', input: BridgeCommand, signal?: AbortSignal): Promise<{ accepted: true; runId: string; revision: number }> {
     return this.request(`/v1/attempts/${encodeURIComponent(id)}/${kind}`, input, signal);

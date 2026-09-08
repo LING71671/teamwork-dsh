@@ -2,19 +2,20 @@
 
 A portable teamwork orchestration runtime, with DeepSeek Harness (DSH) as its first integration.
 
-面向多种 Harness 的独立编排核心，优先接入 DSH。当前为 **0.2.0-dev.1 预发布版**，不是完整产品。
+面向多种 Harness 的独立编排核心，优先接入 DSH。公开版本为 **0.2.0-dev.1 预发布版**；当前工作树是尚未发布的 **0.3.0-dev.1**，新增有限次数修复、暂停/恢复和候选验证队列恢复。不是完整产品。
 
 本项目为独立实现，不是 DeepSeek 或 Google 的官方产品，也不包含其私有运行样本或内部提示词。
 
 ## 当前能力
 
-- Host 工具：`teamwork_start`、`teamwork_status`、`teamwork_control`（取消）。
+- Host 工具：`teamwork_start`、`teamwork_status`、`teamwork_control`（取消；0.3 还支持暂停/恢复）。
+- 0.3 的 `teamwork_inspect` 提供摘要校验后的产物分页读取及基线到候选的变更清单。
 - 独立 Runtime：SQLite 状态、幂等命令、dispatch outbox、可补读的 SSE 事件。
 - 每个 Attempt 使用独立工作副本、DSH SDK 进程和作用域凭证；支持超时与取消。
 - 可选验证：候选内容摘要 → 全新只读评审 → 独立验收命令 → 确定性 Gate。
 - 不自动改写原项目。`verified` 表示候选通过当前验收策略，不表示已集成。
 
-尚未实现：自动修复迭代、暂停/恢复、自动集成、产物下载、slash commands、OpenCode/Pi 适配。后续适配顺序为 DSH → OpenCode → Pi。
+0.3 工作树还支持操作者配置的 1–5 轮有限修复和逐轮证据保留；默认只执行一轮。暂停提供 drain / interrupt；恢复使用新会话而非重新连接旧进程。尚未实现：自动集成、批量产物导出、slash commands、OpenCode/Pi 适配。完整开发方向见 [ROADMAP](ROADMAP.md)。后续适配顺序为 DSH → OpenCode → Pi。
 
 ## 从源码使用
 
@@ -28,7 +29,7 @@ npm ci --registry=https://registry.npmjs.org
 npm test
 ```
 
-`npm test` 会构建源码并执行 35 项测试，包括真实 DSH SDK/Cordis 的离线模型适配器集成测试；不需要 API key，也不验证真实模型的任务效果。
+`v0.2.0-dev.1` 有 35 项测试，当前 0.3 工作树有 74 项。`npm test` 会构建源码并执行测试，包括真实 DSH SDK/Cordis 的离线模型适配器集成测试；不需要 API key，也不验证真实模型的任务效果。
 
 编辑 `examples/runtime.example.json` 中的绝对路径和 DSH 模型路由，按实际位置修改 `examples/host.cordis.patch.yml`。示例路径仅为占位，不会替换你的凭据。
 

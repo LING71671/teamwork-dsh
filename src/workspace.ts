@@ -1,7 +1,7 @@
 import { mkdir, readdir, lstat, copyFile, realpath, readFile } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 import { relative, isAbsolute, join, resolve, dirname } from 'node:path';
-import { Fault } from './contracts.js';
+import { Fault, type TreeEntry, type TreeManifest } from './contracts.js';
 
 export const inside = (parent: string, child: string): boolean => {
   const path = relative(resolve(parent), resolve(child));
@@ -48,10 +48,15 @@ export async function snapshot(source: string, target: string, signal: AbortSign
 
 /** Content-addressed manifest includes paths, empty directories and executable bits. */
 export async function treeDigest(root: string, signal: AbortSignal): Promise<string> {
+  return (await treeManifest(root, signal)).digest;
+}
+
+export async function treeManifest(root: string, signal: AbortSignal): Promise<TreeManifest> {
   if (relative(resolve(root), await realpath(root)) !== '') throw new Fault('WORKSPACE_SYMLINK', 'Manifest path must not redirect');
   if ((await lstat(root)).isSymbolicLink()) throw new Fault('WORKSPACE_SYMLINK', 'Manifest root must not be a link');
   const hash = createHash('sha256');
   let entries = 0, bytes = 0;
+  const manifest: TreeEntry[] = [];
   const visit = async (directory: string): Promise<void> => {
     signal.throwIfAborted();
     for (const name of (await readdir(directory)).sort()) {
@@ -60,16 +65,23 @@ export async function treeDigest(root: string, signal: AbortSignal): Promise<str
       const path = join(directory, name), stat = await lstat(path);
       const rel = relative(root, path).replaceAll('\\', '/');
       if (stat.isSymbolicLink()) throw new Fault('WORKSPACE_SYMLINK', 'Candidate must not contain links');
-      if (stat.isDirectory()) { hash.update(JSON.stringify(['directory', rel]) + '\n'); await visit(path); }
+      if (stat.isDirectory()) {
+        hash.update(JSON.stringify(['directory', rel]) + '\n');
+        manifest.push({ path: rel, kind: 'directory' });
+        await visit(path);
+      }
       else if (stat.isFile()) {
         if ((bytes += stat.size) > 100 * 1024 * 1024) throw new Fault('WORKSPACE_TOO_LARGE', 'Manifest exceeds byte limit');
         const content = await readFile(path);
-        hash.update(JSON.stringify(['file', rel, stat.mode & 0o111, createHash('sha256').update(content).digest('hex')]) + '\n');
+        if (content.length !== stat.size) throw new Fault('CANDIDATE_CHANGED', 'File changed while scanning');
+        const digest = createHash('sha256').update(content).digest('hex');
+        hash.update(JSON.stringify(['file', rel, stat.mode & 0o111, digest]) + '\n');
+        manifest.push({ path: rel, kind: 'file', size: stat.size, executable: stat.mode & 0o111, digest });
       } else throw new Fault('WORKSPACE_SPECIAL_FILE', 'Candidate must contain regular files only');
     }
   };
   await visit(root);
-  return hash.digest('hex');
+  return { digest: hash.digest('hex'), entries: manifest, bytes };
 }
 
 /** Build outputs may be added, but acceptance may not rewrite/delete candidate inputs. */

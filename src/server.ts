@@ -2,7 +2,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { timingSafeEqual } from 'node:crypto';
 import { ZodError } from 'zod';
 import { Runtime } from './runtime.js';
-import { Fault, protocolVersion, startSchema, cancelSchema, bridgeSchema } from './contracts.js';
+import { Fault, protocolVersion, startSchema, controlSchema, bridgeSchema, pageSchema, filePageSchema, changePageSchema } from './contracts.js';
+import { artifactManifest, artifactFile, artifactChanges } from './artifacts.js';
 
 async function body(req: IncomingMessage): Promise<unknown> {
   if (!req.headers['content-type']?.startsWith('application/json')) throw new Fault('CONTENT_TYPE', 'Use application/json', 415);
@@ -28,6 +29,17 @@ const json = (res: ServerResponse, status: number, value: unknown): void => {
 export async function serve(runtime: Runtime, token: string, port = 0): Promise<{ url: string; close(): Promise<void> }> {
   if (token.length < 32) throw new Fault('CONFIG_INVALID', 'Host token must be at least 32 characters', 400);
   const streams = new Set<ServerResponse>();
+  let inspections = 0;
+  async function inspect<T>(res: ServerResponse, body: (signal: AbortSignal) => Promise<T>): Promise<T> {
+    if (inspections >= 2) throw new Fault('INSPECTION_LIMIT', 'Too many concurrent artifact reads', 429);
+    inspections++;
+    const abort = new AbortController();
+    const close = (): void => abort.abort(new Fault('ABORTED', 'Artifact reader disconnected'));
+    res.once('close', close);
+    const timer = setTimeout(() => abort.abort(new Fault('INSPECTION_TIMEOUT', 'Artifact read deadline exceeded', 503)), 15_000);
+    try { return await body(abort.signal); }
+    finally { clearTimeout(timer); res.off('close', close); inspections--; }
+  }
   const server = createServer((req, res) => { void route(req, res).catch(error => {
     if (res.headersSent) { res.end(); return; }
     const fault = error instanceof Fault ? error : error instanceof ZodError
@@ -55,23 +67,42 @@ export async function serve(runtime: Runtime, token: string, port = 0): Promise<
     }
     if (!equal(auth, token)) throw new Fault('UNAUTHORIZED', 'Invalid host credential', 401);
     if (req.method === 'GET' && url.pathname === '/v1/hello') {
-      json(res, 200, { protocolVersion, features: ['start', 'status', 'cancel', 'checkpoint', 'submit', 'events', 'review-gate'],
+      json(res, 200, { protocolVersion, features: ['start', 'status', 'cancel', 'pause', 'resume', 'checkpoint', 'submit', 'events', 'review-gate', 'bounded-repair', 'candidate-recovery', 'artifacts', 'changes'],
         verificationEnabled: runtime.verificationEnabled,
-        limitations: ['no-auto-integration', 'no-auto-repair', 'no-stdio-reattach', 'cooperative-isolation'] });
+        maxIterations: runtime.maxIterations,
+        limitations: ['no-auto-integration', 'no-stdio-reattach', 'cooperative-isolation'] });
       return;
     }
     if (req.method === 'POST' && url.pathname === '/v1/runs') {
       json(res, 202, runtime.start(startSchema.parse(await body(req)))); return;
+    }
+    const artifact = /^\/v1\/runs\/([a-zA-Z0-9_-]+)\/(artifacts|changes)(?:\/([a-zA-Z0-9_-]+)(\/file)?)?$/.exec(url.pathname);
+    if (artifact && req.method === 'GET') {
+      const runId = artifact[1]!, artifactId = artifact[3];
+      const query = Object.fromEntries(url.searchParams);
+      if (Object.keys(query).length !== [...url.searchParams].length) throw new Fault('SCHEMA_INVALID', 'Duplicate query parameters', 400);
+      if (artifact[2] === 'changes' && !artifactId) {
+        const input = changePageSchema.parse(query);
+        json(res, 200, await inspect(res, signal => artifactChanges(runtime.store, runId, input.artifactId, input.offset, input.limit, signal))); return;
+      }
+      if (artifact[2] !== 'artifacts') throw new Fault('NOT_FOUND', 'Unknown artifact route', 404);
+      if (artifactId && artifact[4]) {
+        const input = filePageSchema.parse(query);
+        json(res, 200, await inspect(res, signal => artifactFile(runtime.store, runId, artifactId, input.path, input.offset, input.length, signal))); return;
+      }
+      const input = pageSchema.parse(query);
+      if (!artifactId) { json(res, 200, runtime.store.artifacts(runId, input.offset, input.limit)); return; }
+      json(res, 200, await inspect(res, signal => artifactManifest(runtime.store, runId, artifactId, input.offset, input.limit, signal))); return;
     }
     const match = /^\/v1\/runs\/([a-zA-Z0-9_-]+)(?:\/(commands|events))?$/.exec(url.pathname);
     if (!match) throw new Fault('NOT_FOUND', 'Unknown route', 404);
     const id = match[1]!;
     if (req.method === 'POST' && match[2] === 'commands') {
       const input = await body(req);
-      if (typeof input === 'object' && input !== null && 'type' in input && input.type !== 'cancel') {
-        throw new Fault('CAPABILITY_MISSING', 'This slice supports cancel only', 422);
+      if (typeof input === 'object' && input !== null && 'type' in input && !['cancel', 'pause', 'resume'].includes(String(input.type))) {
+        throw new Fault('CAPABILITY_MISSING', 'Unknown control command', 422);
       }
-      json(res, 202, runtime.cancel(id, cancelSchema.parse(input))); return;
+      json(res, 202, runtime.control(id, controlSchema.parse(input))); return;
     }
     if (req.method !== 'GET') throw new Fault('NOT_FOUND', 'Unknown route', 404);
     if (!match[2]) { json(res, 200, runtime.store.get(id)); return; }

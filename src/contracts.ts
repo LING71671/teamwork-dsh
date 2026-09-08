@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const protocolVersion = '0.2';
+export const protocolVersion = '0.3';
 export const identifier = z.string().min(1).max(128).regex(/^[a-zA-Z0-9_-]+$/);
 export const startSchema = z.object({
   commandId: identifier,
@@ -11,6 +11,9 @@ export const cancelSchema = z.object({
   expectedRevision: z.number().int().nonnegative(),
   type: z.literal('cancel'),
 }).strict();
+export const pauseSchema = cancelSchema.extend({ type: z.literal('pause'), mode: z.enum(['drain', 'interrupt']).default('drain') });
+export const resumeSchema = cancelSchema.extend({ type: z.literal('resume') });
+export const controlSchema = z.discriminatedUnion('type', [cancelSchema, pauseSchema, resumeSchema]);
 export const reportSchema = z.object({
   outcome: z.enum(['completed', 'incomplete']),
   summary: z.string().trim().min(1).max(16_000),
@@ -23,6 +26,8 @@ export const reportSchema = z.object({
   }).strict().optional(),
 }).strict();
 export const verificationSchema = z.object({
+  // Total implementation rounds, including the first. Absent means no automatic repair.
+  maxIterations: z.number().int().min(1).max(5).optional(),
   commands: z.array(z.object({
     id: identifier,
     executable: z.string().min(1),
@@ -31,7 +36,25 @@ export const verificationSchema = z.object({
   }).strict()).min(1).max(20).refine(commands => new Set(commands.map(c => c.id)).size === commands.length, 'Command IDs must be unique'),
 }).strict();
 export type VerificationPolicy = z.infer<typeof verificationSchema>;
-export interface Candidate { workspace: string; digest: string }
+export interface Candidate { workspace: string; digest: string; artifactId?: string }
+export interface ArtifactDescriptor {
+  id: string; runId: string; kind: 'baseline' | 'candidate' | 'checkpoint'; digest: string; attemptId: string; createdAt: string;
+}
+export type TreeEntry = { path: string; kind: 'directory' } |
+  { path: string; kind: 'file'; size: number; executable: number; digest: string };
+export interface TreeManifest { digest: string; entries: TreeEntry[]; bytes: number }
+export interface ArtifactPage { artifact: ArtifactDescriptor; entries: TreeEntry[]; total: number; nextOffset: number | null }
+export interface ArtifactFile {
+  artifact: ArtifactDescriptor; path: string; digest: string; size: number; offset: number; bytes: number;
+  encoding: 'utf8' | 'base64'; content: string; nextOffset: number | null;
+}
+export interface Change { path: string; kind: 'added' | 'deleted' | 'modified' | 'type_changed'; before?: TreeEntry; after?: TreeEntry }
+export interface ChangePage { baseline: ArtifactDescriptor; candidate: ArtifactDescriptor; changes: Change[]; total: number; nextOffset: number | null }
+export const pageSchema = z.object({ offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
+  limit: z.coerce.number().int().min(1).max(500).default(100) }).strict();
+export const filePageSchema = z.object({ path: z.string().min(1).max(2048), offset: z.coerce.number().int().min(0).max(100 * 1024 * 1024).default(0),
+  length: z.coerce.number().int().min(1).max(65_536).default(16_384) }).strict();
+export const changePageSchema = pageSchema.extend({ artifactId: identifier.optional() });
 export interface ValidationResult {
   commandId: string;
   status: 'passed' | 'failed' | 'timed_out' | 'spawn_failed';
@@ -48,9 +71,13 @@ export const bridgeSchema = z.object({
 }).strict();
 export type StartCommand = z.infer<typeof startSchema>;
 export type CancelCommand = z.infer<typeof cancelSchema>;
+export type PauseCommand = z.infer<typeof pauseSchema>;
+export type ResumeCommand = z.infer<typeof resumeSchema>;
+export type ControlCommand = z.infer<typeof controlSchema>;
 export type Report = z.infer<typeof reportSchema>;
 export type BridgeCommand = z.infer<typeof bridgeSchema>;
-export type Phase = 'queued' | 'starting' | 'running' | 'stopping' |
+export type Phase = 'queued' | 'repair_queued' | 'verification_queued' | 'verification_starting' |
+  'pausing' | 'paused' | 'starting' | 'running' | 'stopping' |
   'submitted' | 'failed' | 'cancelled' | 'blocked' | 'freezing' | 'reviewing' | 'validating' | 'verified' | 'rejected';
 
 export interface WorkOrder {
@@ -61,10 +88,27 @@ export interface WorkOrder {
   epoch: number;
   specRevision: number;
   inputDigest: string;
+  inputTreeDigest?: string;
   objective: string;
   workspace: string;
   role?: 'implementation' | 'review';
   candidateDigest?: string;
+  repair?: { candidate: Candidate; feedback: string };
+  resume?: { previousAttemptId: string; candidate?: Candidate; checkpoint?: Report };
+}
+export type PauseContinuation = { kind: 'queued'; phase: 'queued' | 'repair_queued' | 'verification_queued' } |
+  { kind: 'implementation'; candidate?: Candidate } | { kind: 'verification'; candidate: Candidate } |
+  { kind: 'submitted'; candidate: Candidate };
+export interface RoundEvidence {
+  iteration: number;
+  order: WorkOrder;
+  report?: Report;
+  checkpoint?: Report;
+  candidate?: Candidate;
+  reviewAttempt?: { order: WorkOrder; report?: Report; checkpoint?: Report };
+  validation?: ValidationResult[];
+  gateReasons?: string[];
+  finishedAt: string;
 }
 export interface Run {
   id: string;
@@ -78,10 +122,16 @@ export interface Run {
   checkpoint?: Report;
   reason?: string;
   verification?: VerificationPolicy;
+  baseline?: Candidate;
   candidate?: Candidate;
   reviewAttempt?: { order: WorkOrder; report?: Report; checkpoint?: Report };
   validation?: ValidationResult[];
   gateReasons?: string[];
+  // Optional for reading databases written before protocol 0.3; defaults to 1 / [].
+  iteration?: number;
+  history?: RoundEvidence[];
+  pause?: { mode: 'drain' | 'interrupt'; stage: Phase; continuation?: PauseContinuation };
+  suspensions?: RoundEvidence[];
 }
 export interface Event {
   cursor: number;

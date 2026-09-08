@@ -1,6 +1,6 @@
 {
   "name": "@teamwork/dsh-plugin",
-  "version": "0.2.0-dev.1",
+  "version": "0.3.0-dev.1",
   "description": "Portable teamwork runtime with DeepSeek Harness host and worker plugins",
   "type": "module",
   "private": true,
@@ -15,7 +15,7 @@
     "./client": "./dist/src/client.js"
   },
   "bin": { "teamwork-runtime": "dist/src/cli.js" },
-  "files": ["dist/src", "examples", "DEVELOPMENT.md", "CHANGELOG.md"],
+  "files": ["dist/src", "examples", "DEVELOPMENT.md", "CHANGELOG.md", "ROADMAP.md"],
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "test": "npm run build && node --test dist/test/*.test.js",
