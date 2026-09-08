@@ -116,6 +116,7 @@ host 与 Runtime 应一起更新；hello 会报告 `verificationEnabled`、`maxI
 | `GET /v1/runs/{runId}/artifacts/{artifactId}` | host；核对树摘要并分页列出文件/目录 |
 | `GET /v1/runs/{runId}/artifacts/{artifactId}/file?path={relativePath}` | host；核对文件摘要并分页读取内容 |
 | `GET /v1/runs/{runId}/changes` | host；原始基线到当前或指定候选/暂停快照的精确变更清单 |
+| `GET /v1/runs/{runId}/integration-preview` | host；基线、候选和当前配置项目的只读三方冲突预览 |
 | `POST /v1/attempts/{attemptId}/checkpoint` | 该 Attempt 独有凭证 |
 | `POST /v1/attempts/{attemptId}/submit` | 该 Attempt 独有凭证 |
 
@@ -132,6 +133,16 @@ worker 从进程环境绑定 epoch、inputDigest 和根 session ID，不允许�
 所有读取只接受本 Run 已登记的引用；拒绝 worker 凭证、跨 Run 引用、绝对路径、`..`、Windows ADS/device 路径、符号链接及摘要不匹配。最多同时执行 2 个文件/清单/变更检查，每次 15 秒上限。产物内容是未信任数据。旧数据目录中没有登记基线/产物的记录不会被猜测为可读文件；接口会报告缺失。
 
 文件读取与变更清单不会写回原项目，也没有开放任意路径读取或任意产物注册的 HTTP 接口。
+
+### 集成冲突预览（未实现写回）
+
+`teamwork_inspect` 使用 `kind: "integration"`，默认选当前 Candidate，也可用 artifactId 指定已登记的历史候选或暂停快照。Runtime 只读取其配置的原项目，不接受模型传入目标目录。清单对比最初基线、所选快照、当前项目；保留与候选变更无关的用户修改，不自动做同文件文本合并。
+
+每项 disposition 是 `apply`（可计划应用）、`already_applied`（目标已是相同内容）或 `conflict`。冲突原因包括 `concurrent_change`、`ancestor_changed`、`descendant_changed`、`protected_path`、`path_alias`。整个计划的 status 为 clear/conflicts；即使当前分页没显示冲突，conflictCount 也计算完整清单。删除/替换目录时，用户新增或修改的子项会阻止操作；目录内 `.git`、`node_modules`、`.teamwork`、`.env`、`.env.*`、`.npmrc` 等排除项也会阻止操作，且不会读取其内容。过滤名称不区分大小写。大小写或 Unicode 规范化别名保守报冲突。
+
+预览始终 `readOnly: true`，不持有锁、不建立持久集成事务、不修改 Run，也不表示操作者已授权写回。`candidateVerified` 只说明选中了当前已通过 Gate 的候选；它与冲突状态独立，不能充当最终集成验收。
+
+分页 offset/limit 与产物清单相同。首屏返回内容绑定的 id；继续请求时传相同 candidate.id 为 artifactId、相同 id 为 planId。普通项目内容或受保护路径集合变化会返回 `INTEGRATION_PLAN_STALE`，需从第一页重新检查。预览期间仍可能发生并发编辑，它不是原子文件系统快照；未来执行器还必须在串行事务中重新检查每个 effect，不能直接执行旧预览。最多 2 个并发检查、15 秒请求上限与现有产物读取共享。
 
 ## 恢复与边界
 

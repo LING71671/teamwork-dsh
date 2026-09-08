@@ -34,7 +34,7 @@ test('host registers with real Cordis tools; reload removes old tools and never 
     const status = await ctx.tools.execute({ callId: 'status-call' as ToolExecutionInput['callId'],
       name: 'teamwork_status', arguments: { runId: run.id }, signal: new AbortController().signal });
     assert.equal(status.isError, false, JSON.stringify(status));
-    await waitFor(() => f.store.get(run.id).baseline);
+    await waitFor(() => f.store.get(run.id).phase === 'running' ? true : undefined);
     const pause = await ctx.tools.execute({ callId: 'pause-call' as ToolExecutionInput['callId'], name: 'teamwork_control',
       arguments: { runId: run.id, commandId: 'pause', type: 'pause', mode: 'interrupt', expectedRevision: f.store.get(run.id).revision }, signal: new AbortController().signal });
     assert.equal(pause.isError, false, JSON.stringify(pause));
@@ -43,6 +43,13 @@ test('host registers with real Cordis tools; reload removes old tools and never 
       arguments: { runId: run.id, kind: 'artifacts' }, signal: new AbortController().signal });
     assert.equal(inspect.isError, false, JSON.stringify(inspect));
     assert.match(JSON.stringify(inspect), /baseline/);
+    const checkpoint = f.store.artifacts(run.id).artifacts.find(a => a.kind === 'checkpoint');
+    assert.ok(checkpoint);
+    const preview = await ctx.tools.execute({ callId: 'preview-call' as ToolExecutionInput['callId'], name: 'teamwork_inspect',
+      arguments: { runId: run.id, kind: 'integration', artifactId: checkpoint.id }, signal: new AbortController().signal });
+    assert.equal(preview.isError, false, JSON.stringify(preview));
+    assert.match(JSON.stringify(preview), /readOnly/);
+    assert.match(JSON.stringify(preview), /candidateVerified/);
     const resume = await ctx.tools.execute({ callId: 'resume-call' as ToolExecutionInput['callId'], name: 'teamwork_control',
       arguments: { runId: run.id, commandId: 'resume', type: 'resume', expectedRevision: f.store.get(run.id).revision }, signal: new AbortController().signal });
     assert.equal(resume.isError, false, JSON.stringify(resume));

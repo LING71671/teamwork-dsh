@@ -8,6 +8,7 @@ export const inside = (parent: string, child: string): boolean => {
   return path === '' || (!path.startsWith('..') && !isAbsolute(path));
 };
 const excluded = new Set(['.git', 'node_modules', '.teamwork', '.env', '.npmrc']);
+export const excludedSourceName = (name: string): boolean => excluded.has(name.toLowerCase()) || name.toLowerCase().startsWith('.env.');
 
 /** Independent working copy; no hardlinks, no user-tree writes, no automatic integration. */
 export async function snapshot(source: string, target: string, signal: AbortSignal, exact = false): Promise<void> {
@@ -29,7 +30,7 @@ export async function snapshot(source: string, target: string, signal: AbortSign
     await mkdir(to, { recursive: true });
     for (const entry of await readdir(from, { withFileTypes: true })) {
       signal.throwIfAborted();
-      if (!exact && (excluded.has(entry.name) || entry.name.startsWith('.env.'))) continue;
+      if (!exact && excludedSourceName(entry.name)) continue;
       if (++count > 20_000) throw new Fault('WORKSPACE_TOO_LARGE', 'Snapshot exceeds 20,000 entries');
       const src = join(from, entry.name), dst = join(to, entry.name);
       const info = await lstat(src);
@@ -52,6 +53,18 @@ export async function treeDigest(root: string, signal: AbortSignal): Promise<str
 }
 
 export async function treeManifest(root: string, signal: AbortSignal): Promise<TreeManifest> {
+  return scanManifest(root, signal);
+}
+
+/** Read the same ordinary tree used for initial snapshots, retaining opaque exclusion barriers.
+ * Excluded contents are never traversed or hashed, including excluded junctions. */
+export async function sourceManifest(root: string, signal: AbortSignal): Promise<{ manifest: TreeManifest; protectedPaths: string[] }> {
+  const protectedPaths: string[] = [];
+  const manifest = await scanManifest(root, signal, protectedPaths);
+  return { manifest, protectedPaths };
+}
+
+async function scanManifest(root: string, signal: AbortSignal, protectedPaths?: string[]): Promise<TreeManifest> {
   if (relative(resolve(root), await realpath(root)) !== '') throw new Fault('WORKSPACE_SYMLINK', 'Manifest path must not redirect');
   if ((await lstat(root)).isSymbolicLink()) throw new Fault('WORKSPACE_SYMLINK', 'Manifest root must not be a link');
   const hash = createHash('sha256');
@@ -62,8 +75,10 @@ export async function treeManifest(root: string, signal: AbortSignal): Promise<T
     for (const name of (await readdir(directory)).sort()) {
       signal.throwIfAborted();
       if (++entries > 20_000) throw new Fault('WORKSPACE_TOO_LARGE', 'Manifest exceeds entry limit');
-      const path = join(directory, name), stat = await lstat(path);
+      const path = join(directory, name);
       const rel = relative(root, path).replaceAll('\\', '/');
+      if (protectedPaths && excludedSourceName(name)) { protectedPaths.push(rel); continue; }
+      const stat = await lstat(path);
       if (stat.isSymbolicLink()) throw new Fault('WORKSPACE_SYMLINK', 'Candidate must not contain links');
       if (stat.isDirectory()) {
         hash.update(JSON.stringify(['directory', rel]) + '\n');

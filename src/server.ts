@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { timingSafeEqual } from 'node:crypto';
 import { ZodError } from 'zod';
 import { Runtime } from './runtime.js';
-import { Fault, protocolVersion, startSchema, controlSchema, bridgeSchema, pageSchema, filePageSchema, changePageSchema } from './contracts.js';
+import { Fault, protocolVersion, startSchema, controlSchema, bridgeSchema, pageSchema, filePageSchema, changePageSchema, integrationPageSchema } from './contracts.js';
 import { artifactManifest, artifactFile, artifactChanges } from './artifacts.js';
 
 async function body(req: IncomingMessage): Promise<unknown> {
@@ -67,7 +67,7 @@ export async function serve(runtime: Runtime, token: string, port = 0): Promise<
     }
     if (!equal(auth, token)) throw new Fault('UNAUTHORIZED', 'Invalid host credential', 401);
     if (req.method === 'GET' && url.pathname === '/v1/hello') {
-      json(res, 200, { protocolVersion, features: ['start', 'status', 'cancel', 'pause', 'resume', 'checkpoint', 'submit', 'events', 'review-gate', 'bounded-repair', 'candidate-recovery', 'artifacts', 'changes'],
+      json(res, 200, { protocolVersion, features: ['start', 'status', 'cancel', 'pause', 'resume', 'checkpoint', 'submit', 'events', 'review-gate', 'bounded-repair', 'candidate-recovery', 'artifacts', 'changes', 'integration-preview'],
         verificationEnabled: runtime.verificationEnabled,
         maxIterations: runtime.maxIterations,
         limitations: ['no-auto-integration', 'no-stdio-reattach', 'cooperative-isolation'] });
@@ -75,6 +75,13 @@ export async function serve(runtime: Runtime, token: string, port = 0): Promise<
     }
     if (req.method === 'POST' && url.pathname === '/v1/runs') {
       json(res, 202, runtime.start(startSchema.parse(await body(req)))); return;
+    }
+    const preview = /^\/v1\/runs\/([a-zA-Z0-9_-]+)\/integration-preview$/.exec(url.pathname);
+    if (preview && req.method === 'GET') {
+      const query = Object.fromEntries(url.searchParams);
+      if (Object.keys(query).length !== [...url.searchParams].length) throw new Fault('SCHEMA_INVALID', 'Duplicate query parameters', 400);
+      const input = integrationPageSchema.parse(query);
+      json(res, 200, await inspect(res, signal => runtime.previewIntegration(preview[1]!, input.artifactId, input.offset, input.limit, input.planId, signal))); return;
     }
     const artifact = /^\/v1\/runs\/([a-zA-Z0-9_-]+)\/(artifacts|changes)(?:\/([a-zA-Z0-9_-]+)(\/file)?)?$/.exec(url.pathname);
     if (artifact && req.method === 'GET') {

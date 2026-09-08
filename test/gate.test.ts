@@ -49,6 +49,16 @@ test('Gate needs independent review and command evidence for exact candidate; or
     assert.equal(result.validation![0]!.exitCode, 0);
     assert.equal(result.candidate!.digest, result.reviewAttempt!.order.candidateDigest);
     assert.equal(await readFile(join(f.source, 'hello.txt'), 'utf8'), 'original');
+    const preview = await f.client.previewIntegration(run.id);
+    assert.equal(preview.candidateVerified, true);
+    assert.equal(preview.status, 'clear');
+    assert.equal(preview.readOnly, true);
+    await writeFile(join(f.source, 'hello.txt'), 'concurrent user change');
+    const conflicting = await f.client.previewIntegration(run.id);
+    assert.equal(conflicting.candidateVerified, true);
+    assert.equal(conflicting.status, 'conflicts');
+    assert.equal(await readFile(join(f.source, 'hello.txt'), 'utf8'), 'concurrent user change');
+    assert.equal(f.store.get(run.id).phase, 'verified'); // Preview cannot promote/rewrite the run.
   } finally { await f.cleanup(); }
 });
 

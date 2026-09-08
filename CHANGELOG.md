@@ -10,7 +10,10 @@
 - A stopped candidate and its verification outbox are committed together; queued verification resumes after SQLite reopen without repeating implementation. Ambiguous claimed processes remain blocked.
 - Original baseline snapshots and actual input-tree digest binding before execution. The baseline is retained across repairs and resumes.
 - Transactional artifact references, host-only paginated manifest/file reads, binary/UTF-8 byte preservation and exact baseline-to-candidate change manifests through `teamwork_inspect` and HTTP.
-- 74 tests locally, including real DSH repair/pause chains, candidate recovery, artifact scope/path/tamper handling and input binding. Not part of v0.2.0-dev.1.
+- Read-only three-way integration planning against the recorded baseline, registered candidate/checkpoint and current configured project; host-only paginated HTTP/DSH inspection with stale-plan detection.
+- Conflict detection covers concurrent file/mode changes, ancestor replacement, directory deletion with user-added/modified children, protected descendants and case/Unicode aliases. No project writeback, journal or final integrated acceptance is implemented yet.
+- Source snapshot exclusions are now case-insensitive, including `.ENV.*` and `.NPMRC`; integration inspection uses the same filter without reading excluded contents.
+- 90 tests locally, including real DSH repair/pause chains, candidate recovery, artifact scope/path/tamper handling, input binding and integration preflight. Not part of v0.2.0-dev.1.
 
 ## 0.2.0-dev.1 — 2026-09-08
 

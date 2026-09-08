@@ -7,6 +7,7 @@ import { activityPhase } from './kernel.js';
 import { snapshot, treeDigest, inputsUnchanged } from './workspace.js';
 import { runOwned } from './owned-execution.js';
 import { validateCommand } from './validation.js';
+import { integrationPreview } from './integration-preview.js';
 
 export interface RuntimeOptions {
   source: string;
@@ -25,6 +26,9 @@ export class Runtime {
   constructor(readonly store: Store, private readonly executor: Executor, private readonly options: RuntimeOptions) {}
   get verificationEnabled(): boolean { return this.options.verification !== undefined; }
   get maxIterations(): number { return this.options.verification?.maxIterations ?? 1; }
+  previewIntegration(id: string, artifactId: string | undefined, offset: number, limit: number, planId: string | undefined, signal: AbortSignal) {
+    return integrationPreview(this.store, this.options.source, id, artifactId, offset, limit, planId, signal);
+  }
   connect(url: string): void {
     this.store.bindProfile({ source: this.options.source, attemptsDirectory: this.options.attemptsDirectory,
       executionProfile: this.options.executionProfile,

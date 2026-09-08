@@ -50,11 +50,33 @@ export interface ArtifactFile {
 }
 export interface Change { path: string; kind: 'added' | 'deleted' | 'modified' | 'type_changed'; before?: TreeEntry; after?: TreeEntry }
 export interface ChangePage { baseline: ArtifactDescriptor; candidate: ArtifactDescriptor; changes: Change[]; total: number; nextOffset: number | null }
+export type IntegrationConflict = 'concurrent_change' | 'ancestor_changed' | 'descendant_changed' | 'protected_path' | 'path_alias';
+export interface IntegrationChange extends Change {
+  disposition: 'apply' | 'already_applied' | 'conflict';
+  reasons: IntegrationConflict[];
+}
+export interface IntegrationPlan {
+  id: string;
+  baselineDigest: string;
+  candidateDigest: string;
+  targetDigest: string;
+  status: 'clear' | 'conflicts';
+  changes: IntegrationChange[];
+}
+export interface IntegrationPreview extends Omit<IntegrationPlan, 'changes'> {
+  runId: string; revision: number;
+  baseline: ArtifactDescriptor; candidate: ArtifactDescriptor;
+  candidateVerified: boolean;
+  // A read-only preflight, never an authorization, lock, or final acceptance result.
+  readOnly: true;
+  changes: IntegrationChange[]; total: number; conflictCount: number; nextOffset: number | null;
+}
 export const pageSchema = z.object({ offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
   limit: z.coerce.number().int().min(1).max(500).default(100) }).strict();
 export const filePageSchema = z.object({ path: z.string().min(1).max(2048), offset: z.coerce.number().int().min(0).max(100 * 1024 * 1024).default(0),
   length: z.coerce.number().int().min(1).max(65_536).default(16_384) }).strict();
 export const changePageSchema = pageSchema.extend({ artifactId: identifier.optional() });
+export const integrationPageSchema = changePageSchema.extend({ planId: z.string().regex(/^[a-f0-9]{64}$/).optional() });
 export interface ValidationResult {
   commandId: string;
   status: 'passed' | 'failed' | 'timed_out' | 'spawn_failed';
