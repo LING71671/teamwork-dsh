@@ -4,14 +4,14 @@ import { join, relative, resolve } from 'node:path';
 import { Fault, type ArtifactDescriptor, type ArtifactFile, type ArtifactPage, type Change, type ChangePage, type TreeManifest } from './contracts.js';
 import { treeManifest } from './workspace.js';
 import type { Store } from './store.js';
+import { portablePath } from './portable-path.js';
 
 type Record = ArtifactDescriptor & { workspace: string };
 const descriptor = ({ workspace: _workspace, ...value }: Record): ArtifactDescriptor => value;
 
 /** A portable path inside a registered tree, never an OS path supplied by the caller. */
 export function artifactPath(path: string): string {
-  if (!path || path.length > 2048 || /[\\:\u0000-\u001f]/.test(path) || path.split('/').some(part =>
-    !part || part === '.' || part === '..' || /[. ]$/.test(part) || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part))) {
+  if (!portablePath(path)) {
     throw new Fault('ARTIFACT_PATH', 'Use a normalized relative file path', 400);
   }
   return path;

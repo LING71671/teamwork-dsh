@@ -22,10 +22,12 @@ test('host registers with real Cordis tools; reload removes old tools and never 
     await waitFor(() => ctx.tools.get('teamwork_start'));
     assert.equal(f.store.all().length, 0);
     assert.deepEqual(ctx.tools.schemas().map(s => s.name).sort(), ['teamwork_control', 'teamwork_inspect', 'teamwork_integrate', 'teamwork_start', 'teamwork_status']);
+    const spec = { requirements: [{ id: 'fix', text: 'Fix hello.txt' }], writeScope: { files: ['hello.txt'], trees: [] } };
     const result = await ctx.tools.execute({ callId: 'host-call' as ToolExecutionInput['callId'],
-      name: 'teamwork_start', arguments: { commandId: 'start', objective: 'fix' }, signal: new AbortController().signal });
+      name: 'teamwork_start', arguments: { commandId: 'start', objective: 'fix', spec }, signal: new AbortController().signal });
     assert.equal(result.isError, false, JSON.stringify(result));
     const run = f.store.all()[0]!;
+    assert.deepEqual(run.order.spec, spec);
     await fiber.dispose();
     assert.equal(ctx.tools.get('teamwork_start'), undefined);
     fiber = ctx.plugin(host);
@@ -55,6 +57,7 @@ test('host registers with real Cordis tools; reload removes old tools and never 
     assert.equal(resume.isError, false, JSON.stringify(resume));
     await waitFor(() => f.store.get(run.id).phase === 'running' ? true : undefined);
     assert.notEqual(f.store.get(run.id).order.attemptId, run.order.attemptId);
+    assert.deepEqual(f.store.get(run.id).order.spec, spec);
     assert.equal(f.store.all().length, 1);
     await fiber.dispose();
   } finally {

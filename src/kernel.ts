@@ -43,15 +43,22 @@ export function evaluateGate(run: Run, integrity: boolean, acceptanceIntegrity =
   const reasons: string[] = [];
   if (!run.candidate || !integrity) reasons.push('CANDIDATE_CHANGED');
   if (!acceptanceIntegrity) reasons.push('ACCEPTANCE_INPUT_CHANGED');
+  if (run.order.spec && (!run.scopeCheck || run.scopeCheck.inputDigest !== run.order.inputDigest || run.scopeCheck.baselineDigest !== run.baseline?.digest ||
+    run.scopeCheck.candidateDigest !== run.candidate?.digest || run.scopeCheck.violations.length)) reasons.push('SCOPE_NOT_VERIFIED');
   if (run.report?.outcome !== 'completed' || run.report.unresolved.length) reasons.push('IMPLEMENTATION_INCOMPLETE');
   const review = run.reviewAttempt;
   if (!review || review.order.candidateDigest !== run.candidate?.digest || review.order.runId !== run.id ||
       review.order.attemptId === run.order.attemptId || review.order.specRevision !== run.order.specRevision ||
       review.order.epoch !== run.order.epoch || review.order.role !== 'review' ||
+      JSON.stringify(review.order.spec) !== JSON.stringify(run.order.spec) ||
       (review.order.inputTreeDigest !== undefined && review.order.inputTreeDigest !== run.candidate?.digest)) reasons.push('REVIEW_STALE');
   if (review?.report?.outcome !== 'completed' || review.report.unresolved.length ||
       review.report.review?.functionality !== 'pass' || review.report.review.completeness !== 'pass' ||
       review.report.review.findings.length) reasons.push('REVIEW_REJECTED');
+  const requirements = run.order.spec?.requirements ?? [], assessments = review?.report?.review?.requirements ?? [];
+  if (assessments.length !== requirements.length || new Set(assessments.map(item => item.id)).size !== requirements.length ||
+    requirements.some(requirement => !assessments.some(item => item.id === requirement.id))) reasons.push('REQUIREMENT_EVIDENCE_MISSING');
+  else if (assessments.some(item => item.verdict !== 'pass' || !item.evidence.trim())) reasons.push('REQUIREMENT_REJECTED');
   const commands = run.verification?.commands;
   if (!commands?.length || run.validation?.length !== commands.length ||
       commands.some((command, i) => run.validation?.[i]?.commandId !== command.id || run.validation[i]?.status !== 'passed' || run.validation[i]?.exitCode !== 0)) {
@@ -74,7 +81,7 @@ export function repairEligible(run: Run, reasons: string[]): boolean {
   const commands = run.verification?.commands;
   return (run.iteration ?? 1) < (run.verification?.maxIterations ?? 1) &&
     !!run.candidate && !!run.reviewAttempt?.report && reasons.length > 0 &&
-    reasons.every(reason => ['IMPLEMENTATION_INCOMPLETE', 'REVIEW_REJECTED', 'ACCEPTANCE_FAILED'].includes(reason)) &&
+    reasons.every(reason => ['IMPLEMENTATION_INCOMPLETE', 'REVIEW_REJECTED', 'REQUIREMENT_REJECTED', 'ACCEPTANCE_FAILED'].includes(reason)) &&
     !!commands?.length && run.validation?.length === commands.length &&
     commands.every((command, i) => run.validation?.[i]?.commandId === command.id &&
       ['passed', 'failed', 'timed_out'].includes(run.validation[i]!.status));

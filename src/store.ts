@@ -4,7 +4,7 @@ import { join, dirname } from 'node:path';
 import { Fault, terminal, type Run, type Event, type StartCommand, type CancelCommand,
   type BridgeCommand, type Phase, type VerificationPolicy, type Candidate, type WorkOrder, type ValidationResult,
   type PauseCommand, type ResumeCommand, type PauseContinuation, type RoundEvidence, type ArtifactDescriptor, type ResolveIntegrationCommand,
-  type ResolutionContext } from './contracts.js';
+  type ResolutionContext, type ScopeCheck, startSchema } from './contracts.js';
 import { activityPhase, evaluateGate, receive, transition, repairEligible, repairFeedback } from './kernel.js';
 import { IntegrationJournal, integrationStatus } from './integration-journal.js';
 
@@ -16,10 +16,11 @@ function canonical(value: unknown): string {
   return JSON.stringify(value);
 }
 function roundEvidence(run: Run): RoundEvidence {
-  const { report, checkpoint, candidate, reviewAttempt, validation, gateReasons } = run;
+  const { report, checkpoint, candidate, reviewAttempt, validation, gateReasons, scopeCheck } = run;
   return { iteration: run.iteration ?? 1, order: run.order, finishedAt: run.updatedAt,
     ...(report ? { report } : {}), ...(checkpoint ? { checkpoint } : {}), ...(candidate ? { candidate } : {}),
-    ...(reviewAttempt ? { reviewAttempt } : {}), ...(validation ? { validation } : {}), ...(gateReasons ? { gateReasons } : {}) };
+    ...(reviewAttempt ? { reviewAttempt } : {}), ...(validation ? { validation } : {}), ...(gateReasons ? { gateReasons } : {}),
+    ...(scopeCheck ? { scopeCheck } : {}) };
 }
 
 export class Store {
@@ -141,12 +142,14 @@ export class Store {
     });
   }
   start(input: StartCommand, workspace: string, executionProfile: unknown, verification?: VerificationPolicy): Run {
+    input = startSchema.parse(input);
     return this.command(`host:${input.commandId}`, { type: 'start', input }, () => {
       const id = randomUUID(), attemptId = randomUUID();
       const at = new Date().toISOString();
+      const spec = input.spec ?? { requirements: [], writeScope: { files: [], trees: ['.'] } };
       const order = { runId: id, workItemId: randomUUID(), attemptId, dispatchKey: randomUUID(),
-        epoch: 1, specRevision: 1, objective: input.objective,
-        inputDigest: digest(canonical({ objective: input.objective, workspace, executionProfile,
+        epoch: 1, specRevision: 1, objective: input.objective, spec,
+        inputDigest: digest(canonical({ objective: input.objective, spec, workspace, executionProfile,
           ...(verification ? { verification } : {}) })),
         workspace: join(workspace, attemptId, 'work') };
       const run: Run = { id, revision: 0, phase: 'queued', gate: 'not_evaluated', order, iteration: 1, history: [], createdAt: at, updatedAt: at,
@@ -169,7 +172,8 @@ export class Store {
       let run: Run = { id, revision: 0, phase: 'queued', gate: 'not_evaluated', iteration: 1, history: [], createdAt: at, updatedAt: at,
         verification: parent.verification,
         order: { runId: id, workItemId: randomUUID(), attemptId, dispatchKey: randomUUID(), epoch: 1, specRevision: parent.order.specRevision + 1,
-          objective: parent.order.objective, workspace: join(workspace, attemptId, 'work'), inputDigest: '', resolution: context } };
+          objective: parent.order.objective, ...(parent.order.spec ? { spec: parent.order.spec } : {}),
+          workspace: join(workspace, attemptId, 'work'), inputDigest: '', resolution: context } };
       const current = this.registerArtifact(run, context.inputs.current, 'baseline');
       const resolution: ResolutionContext = { ...context, inputs: {
         current, base: this.registerArtifact(run, context.inputs.base, 'context'), proposal: this.registerArtifact(run, context.inputs.proposal, 'context'),
@@ -204,13 +208,9 @@ export class Store {
         if (!repairEligible(current, current.gateReasons ?? [])) throw new Fault('REPAIR_INVALID', 'Repair requires complete failed-round evidence and remaining budget');
         const attemptId = randomUUID();
         const repair = { candidate: current.candidate!, feedback: repairFeedback(current) };
-        const { report, checkpoint, candidate, reviewAttempt, validation, gateReasons, reason: _reason, ...retained } = current;
-        const history = [...(current.history ?? []), {
-          iteration: current.iteration ?? 1, order: current.order, finishedAt: current.updatedAt,
-          ...(report ? { report } : {}), ...(checkpoint ? { checkpoint } : {}),
-          ...(candidate ? { candidate } : {}), ...(reviewAttempt ? { reviewAttempt } : {}),
-          ...(validation ? { validation } : {}), ...(gateReasons ? { gateReasons } : {}),
-        }];
+        const { report: _report, checkpoint: _checkpoint, candidate: _candidate, reviewAttempt: _reviewAttempt,
+          validation: _validation, gateReasons: _gateReasons, scopeCheck: _scopeCheck, reason: _reason, ...retained } = current;
+        const history = [...(current.history ?? []), roundEvidence(current)];
         const { resume: _resume, inputTreeDigest: _inputTree, ...previousOrder } = current.order;
         const order: WorkOrder = { ...previousOrder, attemptId, dispatchKey: randomUUID(), epoch: current.order.epoch + 1,
           role: 'implementation', workspace: join(dirname(dirname(current.order.workspace)), attemptId, 'work'),
@@ -279,7 +279,7 @@ export class Store {
       let next = run;
       if (plan.kind === 'implementation' || plan.kind === 'verification') {
         const { report, checkpoint, candidate: _candidate, reviewAttempt: _review, validation: _validation,
-          gateReasons: _reasons, reason: _reason, ...retained } = run;
+          gateReasons: _reasons, scopeCheck: _scopeCheck, reason: _reason, ...retained } = run;
         const suspensions = [...(run.suspensions ?? []), roundEvidence(run)];
         if (plan.kind === 'implementation') {
           const attemptId = randomUUID();
@@ -351,6 +351,15 @@ export class Store {
         reasons.length ? (repair ? 'repair_queued' : 'rejected') : 'verified');
       this.db.prepare('UPDATE outbox SET state=? WHERE run_id=?').run(repair ? 'pending' : 'done', id);
       return this.save(result, repair ? 'gate.failed_repair_queued' : `gate.${result.gate}`);
+    });
+  }
+  recordScopeCheck(id: string, check: ScopeCheck): void {
+    this.transaction(() => {
+      const run = this.get(id);
+      if (!['running', 'freezing', 'verification_starting', 'reviewing', 'validating'].includes(activityPhase(run))) throw new Fault('RESULT_STALE', 'Scope evidence is no longer accepted');
+      if (check.baselineDigest !== run.baseline?.digest) throw new Fault('SCOPE_BASELINE_STALE', 'Scope evidence must use the original run baseline');
+      if (check.inputDigest !== run.order.inputDigest) throw new Fault('RESULT_STALE', 'Scope evidence belongs to another attempt input');
+      this.save({ ...run, scopeCheck: check, revision: run.revision + 1, updatedAt: new Date().toISOString() }, 'candidate.scope_checked');
     });
   }
   recordValidation(id: string, result: ValidationResult): void {

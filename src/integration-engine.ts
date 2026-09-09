@@ -8,6 +8,8 @@ import { planIntegration } from './integration.js';
 import { type IntegrationEffect, type IntegrationRecord, type IntegrationRequest, integrationRequest } from './integration-journal.js';
 import { inside, snapshot, sourceManifest, treeManifest, inputsUnchanged } from './workspace.js';
 import { validateCommand } from './validation.js';
+import { scopeViolations } from './scope.js';
+import { compareManifests } from './artifacts.js';
 
 // A process-local guard complements the durable DB lease and cross-data-directory reservation.
 // The caller must own the Runtime data directory before recovery; no PID-based owner stealing.
@@ -76,6 +78,9 @@ export class IntegrationEngine {
     const baseline = this.store.artifact(runId, run.baseline.artifactId), candidate = this.store.artifact(runId, run.candidate.artifactId);
     const before = await treeManifest(baseline.workspace, signal), after = await treeManifest(candidate.workspace, signal);
     if (before.digest !== baseline.digest || after.digest !== candidate.digest) throw new Fault('ARTIFACT_CHANGED', 'Integration input changed');
+    if (run.order.spec && scopeViolations(run.order.spec.writeScope, compareManifests(before, after), before, after).length) {
+      throw new Fault('SCOPE_VIOLATION', 'Integration changes exceed the authorized run scope');
+    }
     const target = await sourceManifest(source, signal);
     const plan = planIntegration(before, after, target.manifest, target.protectedPaths);
     if (plan.id !== expectedPlanId) throw new Fault('INTEGRATION_PLAN_STALE', 'Project or candidate changed since preview');

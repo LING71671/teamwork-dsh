@@ -5,7 +5,9 @@ import { Fault, type Executor, type StartCommand, type CancelCommand, type Run,
   type VerificationPolicy, type WorkOrder, type ValidationResult, type ControlCommand, type Candidate,
   type IntegrationPolicy, type IntegrateCommand, type IntegrationStatus, type AbandonIntegrationCommand, type ResolveIntegrationCommand } from './contracts.js';
 import { activityPhase } from './kernel.js';
-import { snapshot, treeDigest, inputsUnchanged } from './workspace.js';
+import { snapshot, treeDigest, treeManifest, inputsUnchanged } from './workspace.js';
+import { compareManifests } from './artifacts.js';
+import { scopeViolations } from './scope.js';
 import { runOwned } from './owned-execution.js';
 import { validateCommand } from './validation.js';
 import { integrationPreview } from './integration-preview.js';
@@ -154,6 +156,16 @@ export class Runtime {
       if (await treeDigest(input.workspace, signal) !== input.digest) throw new Fault('RESOLUTION_CONTEXT_CHANGED', 'Registered resolution evidence changed');
     }
   }
+  private async checkScope(run: Run, candidate: Candidate, signal: AbortSignal): Promise<void> {
+    if (!run.order.spec) return; // Legacy records predate structured scope; do not invent prior authorization.
+    if (!run.baseline) throw new Fault('SCOPE_BASELINE_MISSING', 'Scope verification requires the original baseline');
+    const baseline = await treeManifest(run.baseline.workspace, signal), after = await treeManifest(candidate.workspace, signal);
+    if (baseline.digest !== run.baseline.digest || after.digest !== candidate.digest) throw new Fault('ARTIFACT_CHANGED', 'Scope evidence changed');
+    const violations = scopeViolations(run.order.spec.writeScope, compareManifests(baseline, after), baseline, after);
+    signal.throwIfAborted();
+    this.store.recordScopeCheck(run.id, { inputDigest: run.order.inputDigest, baselineDigest: baseline.digest, candidateDigest: after.digest, violations });
+    if (violations.length) throw new Fault('SCOPE_VIOLATION', 'Candidate changes exceed the authorized write scope');
+  }
   private pump(): void {
     if (this.closing || !this.url) return;
     if (this.activeIntegration) return;
@@ -220,6 +232,7 @@ export class Runtime {
       if (await this.pauseStopped(run.id, abort, true)) return;
       if (!current.verification) {
         const candidate = await this.freeze(current.order.workspace, abort.signal);
+        await this.checkScope(current, candidate, abort.signal);
         abort.signal.throwIfAborted();
         if (await this.pauseStopped(run.id, abort, true)) return;
         this.store.recordSubmission(run.id, candidate);
@@ -227,6 +240,7 @@ export class Runtime {
       else {
         this.store.move(run.id, 'freezing');
         const candidate = await this.freeze(current.order.workspace, abort.signal);
+        await this.checkScope(current, candidate, abort.signal);
         abort.signal.throwIfAborted();
         this.store.queueVerification(run.id, candidate);
       }
@@ -276,6 +290,7 @@ export class Runtime {
       this.store.finishPause(id, { kind: 'implementation' });
     } else {
       const candidate = await this.freeze(current.order.workspace, signal);
+      await this.checkScope(current, candidate, signal);
       this.store.finishPause(id, { kind: implementationCompleted || stage === 'freezing'
         ? (current.verification ? 'verification' : 'submitted') : 'implementation', candidate });
     }
@@ -288,6 +303,7 @@ export class Runtime {
     if (!candidate || await treeDigest(candidate.workspace, signal) !== candidate.digest) {
       throw new Fault('CANDIDATE_CHANGED', 'Queued verification candidate changed');
     }
+    await this.checkScope(run, candidate, signal);
     if (await this.pauseStopped(run.id, abort)) return;
     const { workspace: candidatePath, digest: hash } = candidate;
     const attemptId = randomUUID();
@@ -326,6 +342,7 @@ export class Runtime {
     if (this.store.get(run.id).phase === 'pausing' && (!intact || !acceptanceIntegrity)) throw new Fault('CANDIDATE_CHANGED', 'Paused verification inputs changed');
     if (await this.pauseStopped(run.id, abort)) return;
     await this.checkResolution(run, signal);
+    if (intact) await this.checkScope(run, candidate, signal);
     this.store.finishGate(run.id, results, intact, acceptanceIntegrity);
   }
   async close(): Promise<void> {

@@ -64,6 +64,11 @@ export class DshExecutor implements Executor {
           'You have read-only tools. Assess functionality and completeness separately in report.review; put defects in findings and fail the relevant assessment. Do not claim to have run tests: the Runtime executes acceptance commands independently.'] : []),
         `Run: ${order.runId}; attempt: ${order.attemptId}; input: ${order.inputDigest}`,
         `Objective:\n${order.objective}`,
+        ...(order.spec ? [
+          `Authorized structured requirements and write scope:\n${JSON.stringify(order.spec)}`,
+          'Each requirement is additional to the objective. Scope files authorize exact file paths; trees authorize that directory and descendants; tree "." means the ordinary project. Empty files/trees means no changes. These are literal case-sensitive portable paths, not globs. Necessary new parent directories are allowed, but replacing/deleting a parent requires a tree grant. Do not edit outside this scope, including during repair or conflict resolution.',
+          ...(review && order.spec.requirements.length ? ['Your report.review.requirements must contain exactly one item for every requirement ID: {id, verdict: "pass" or "fail", evidence: "specific observed code/path and reasoning"}. Assess each independently; do not claim Runtime command results you have not observed. Missing, duplicate or unknown IDs cannot pass the Gate.'] : []),
+        ] : []),
         ...(order.resolution ? [
           'This is an integration-conflict resolution work item. The implementation starts from a frozen copy of the CURRENT user project, not the old proposal. Preserve user changes while incorporating the intended functionality; do not blindly replace current files with the proposal.',
           'Additional user-authorized resolution requirements (retain these together with the original objective):',

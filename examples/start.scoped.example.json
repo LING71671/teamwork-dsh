@@ -1,0 +1,14 @@
+{
+  "commandId": "fix-sum-scoped-001",
+  "objective": "Fix sum for empty input, preserving normal addition. Do not install dependencies.",
+  "spec": {
+    "requirements": [
+      { "id": "empty", "text": "sum([]) returns 0." },
+      { "id": "addition", "text": "Nonempty numeric arrays still return their sum." }
+    ],
+    "writeScope": {
+      "files": ["sum.mjs"],
+      "trees": []
+    }
+  }
+}

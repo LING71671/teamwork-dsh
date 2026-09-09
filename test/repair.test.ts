@@ -126,10 +126,13 @@ for (const failure of ['review-mutation', 'spawn-failure', 'repair-base-mutation
 
 function failedRound(store: Store, workspace: string): Run {
   const run = store.start({ commandId: randomUUID(), objective: 'Fix' }, workspace, {}, policy);
-  store.claim(run.id, 'impl-token'); store.move(run.id, 'running');
+  store.claim(run.id, 'impl-token');
+  store.recordBaseline(run.id, { workspace: join(workspace, 'baseline'), digest: 'b'.repeat(64) });
+  store.move(run.id, 'running');
   store.bridge(run.order.attemptId, 'impl-token', 'submit', { commandId: 'submit', epoch: 1, inputDigest: run.order.inputDigest, report });
   store.move(run.id, 'freezing');
   const candidate = { workspace: join(workspace, 'candidate'), digest: 'a'.repeat(64) };
+  store.recordScopeCheck(run.id, { inputDigest: run.order.inputDigest, baselineDigest: 'b'.repeat(64), candidateDigest: candidate.digest, violations: [] });
   const order = { ...run.order, attemptId: randomUUID(), role: 'review' as const, candidateDigest: candidate.digest };
   store.prepareReview(run.id, candidate, order, 'review-token');
   store.bridge(order.attemptId, 'review-token', 'submit', { commandId: 'submit', epoch: 1, inputDigest: order.inputDigest, report: approved });

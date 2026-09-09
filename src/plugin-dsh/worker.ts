@@ -41,7 +41,9 @@ export function apply(ctx: Context): void {
     outcome: { type: 'string', enum: ['completed', 'incomplete'] }, summary: string,
     unresolved: { type: 'array', items: string },
     ...(review ? { review: object({ functionality: { type: 'string', enum: ['pass', 'fail'] },
-      completeness: { type: 'string', enum: ['pass', 'fail'] }, findings: { type: 'array', items: string } }) } : {}),
+      completeness: { type: 'string', enum: ['pass', 'fail'] }, findings: { type: 'array', items: string },
+      requirements: { type: 'array', items: object({ id: string, verdict: { type: 'string', enum: ['pass', 'fail'] }, evidence: string }) },
+    }, ['functionality', 'completeness', 'findings']) } : {}),
   };
   for (const kind of ['checkpoint', 'submit'] as const) {
     const parameters = object({ commandId: string, report: object(reportParameters,

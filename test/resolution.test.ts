@@ -10,20 +10,21 @@ import { Client } from '../src/client.js';
 import { Runtime } from '../src/runtime.js';
 import { serve } from '../src/server.js';
 import { FakeExecutor, setup, waitFor, report } from './helpers.js';
-import type { ResolveIntegrationCommand, ArtifactFile, Run } from '../src/contracts.js';
+import type { ResolveIntegrationCommand, ArtifactFile, Run, RunSpec } from '../src/contracts.js';
 
 const policy = { commands: [{ id: 'accept', executable: process.execPath,
   args: ['-e', "require('node:assert').ok(require('node:fs').readFileSync('hello.txt','utf8').includes('fixed'))"], timeoutMs: 5000 }] };
 const clientOf = (attempt: FakeExecutor['instances'][number]) => new Client(attempt.bridge.url, attempt.bridge.token);
 async function submit(attempt: FakeExecutor['instances'][number], review = false) {
   await clientOf(attempt).bridge(attempt.order.attemptId, 'submit', { commandId: 'submit', epoch: attempt.order.epoch, inputDigest: attempt.order.inputDigest,
-    report: review ? { ...report, review: { functionality: 'pass', completeness: 'pass', findings: [] } } : report });
+    report: review ? { ...report, review: { functionality: 'pass', completeness: 'pass', findings: [],
+      requirements: (attempt.order.spec?.requirements ?? []).map(item => ({ id: item.id, verdict: 'pass', evidence: 'Fixture inspected the fixed content in hello.txt.' })) } } : report });
   attempt.finish();
 }
-async function fixture(verification = policy) {
+async function fixture(verification = policy, spec?: RunSpec) {
   const fake = new FakeExecutor(), f = await setup(fake, 10_000, verification, true);
   try {
-    const started = await f.client.start({ commandId: 'start', objective: 'Implement fixed behavior' });
+    const started = await f.client.start({ commandId: 'start', objective: 'Implement fixed behavior', ...(spec ? { spec } : {}) });
     const implementation = await waitFor(() => fake.instances[0]);
     await assert.rejects(clientOf(implementation).context(implementation.order.attemptId, { kind: 'conflicts', offset: 0, limit: 10 }), { code: 'CONTEXT_MISSING' });
     await writeFile(join(implementation.order.workspace, 'hello.txt'), 'fixed'); await submit(implementation);
@@ -48,7 +49,7 @@ async function verified(f: Awaited<ReturnType<typeof fixture>>, id: string) {
 }
 
 test('conflict becomes a fresh resolution WorkItem with three scoped inputs, a current baseline and an independent Gate', async () => {
-  const f = await fixture();
+  const f = await fixture(policy, { requirements: [{ id: 'fix', text: 'Include fixed behavior in hello.txt' }], writeScope: { files: ['hello.txt'], trees: [] } });
   try {
     const input = await f.command();
     const [child, repeated] = await Promise.all([f.client.resolveIntegration(f.parent.id, f.conflict.id, input), f.client.resolveIntegration(f.parent.id, f.conflict.id, input)]);
@@ -57,6 +58,7 @@ test('conflict becomes a fresh resolution WorkItem with three scoped inputs, a c
     assert.equal(child.order.specRevision, f.parent.order.specRevision + 1);
     assert.equal(child.order.objective, f.parent.order.objective);
     assert.deepEqual(child.verification, f.parent.verification);
+    assert.deepEqual(child.order.spec, f.parent.order.spec);
     assert.equal(child.gate, 'not_evaluated'); assert.equal(child.order.epoch, 1);
     assert.equal((await f.client.integration(f.parent.id, f.conflict.id)).resolutionRunId, child.id);
     assert.ok(f.store.events(child.id, 0).some(e => e.type === 'run.resolution_created'));
@@ -91,6 +93,21 @@ test('conflict becomes a fresh resolution WorkItem with three scoped inputs, a c
     assert.equal(f.store.integrations.get(f.conflict.id).phase, 'conflict'); // Old conflict is not rewritten as success.
     assert.deepEqual(await f.client.resolveIntegration(f.parent.id, f.conflict.id, input), child);
     await assert.rejects(f.client.resolveIntegration(f.parent.id, f.conflict.id, { ...input, instructions: 'different' }), { code: 'IDEMPOTENCY_CONFLICT' });
+  } finally { await f.cleanup(); }
+});
+
+test('conflict instructions cannot silently widen inherited file authorization', async () => {
+  const f = await fixture(policy, { requirements: [], writeScope: { files: ['hello.txt'], trees: [] } });
+  try {
+    const child = await f.client.resolveIntegration(f.parent.id, f.conflict.id, { ...await f.command(), instructions: 'Resolve conflict and also replace user-only' });
+    const resolver = await waitFor(() => f.fake.instances[2]);
+    await writeFile(join(resolver.order.workspace, 'hello.txt'), 'fixed + user change');
+    await writeFile(join(resolver.order.workspace, 'user-only'), 'not authorized'); await submit(resolver);
+    const failed = await verified(f, child.id);
+    assert.equal(failed.phase, 'failed'); assert.equal(failed.reason, 'SCOPE_VIOLATION');
+    assert.deepEqual(failed.scopeCheck?.violations, ['user-only']);
+    assert.equal(f.fake.instances.length, 3);
+    assert.equal(await readFile(join(f.source, 'user-only'), 'utf8'), 'keep this');
   } finally { await f.cleanup(); }
 });
 

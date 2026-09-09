@@ -19,6 +19,14 @@ export class Client {
       headers: { authorization: `Bearer ${this.token}`, 'content-type': 'application/json' },
       ...(data === undefined ? {} : { body: JSON.stringify(data) }),
       signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+    }).catch((error: unknown) => {
+      if (timeout.aborted || signal?.aborted) throw error;
+      const cause = error instanceof Error ? error.cause : undefined;
+      const code = cause && typeof cause === 'object' && 'code' in cause && typeof cause.code === 'string' && /^[A-Z0-9_]{1,64}$/.test(cause.code)
+        ? cause.code : 'UNKNOWN';
+      const fault = new Fault('TRANSPORT_ERROR', `Runtime connection failed (${code}); command outcome may be unknown. Retry only with the same command ID and payload.`, 503);
+      fault.cause = error;
+      throw fault; // Never silently replay a possibly accepted write.
     });
     const result = await response.json() as { error?: { code: string; message: string } };
     if (!response.ok) throw new Fault(result.error?.code ?? 'HTTP_ERROR', result.error?.message ?? 'Runtime request failed', response.status);

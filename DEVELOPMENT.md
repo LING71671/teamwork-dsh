@@ -16,7 +16,7 @@ npm ci --registry=https://registry.npmjs.org
 npm test
 ```
 
-目前有 138 项自动化测试。真实 DSH 测试覆盖单实现者、完整评审/Gate、四进程失败修复链，以及“checkpoint → 中断并确认退出 → 新实现者 → 新评审 → 验收”三进程恢复链；离线 LLM adapter 调用真实工具，不发送网络模型请求、不需要 API key。显式集成测试进一步将真实 DSH 的候选写回临时项目，保留期间新增的用户文件并重新验收；冲突链覆盖读取三方内容、产生新候选、独立评审、再次显式集成。其他测试覆盖去重、身份/版本拒绝、候选和上下文篡改、读取凭证撤销、失败/超时/输入改写、暂停竞态、重载、产物权限与分页、三方冲突、SQLite 恢复、真实子进程退出边界、取消、保留当前文件、需求继承上限和新工作项事务回滚。这不等同于真实模型效果验收。
+目前有 155 项自动化测试。真实 DSH 测试覆盖单实现者、完整评审/Gate、结构化需求逐项评审、四进程失败修复链，以及“checkpoint → 中断并确认退出 → 新实现者 → 新评审 → 验收”三进程恢复链；离线 LLM adapter 调用真实工具，不发送网络模型请求、不需要 API key。显式集成测试进一步将真实 DSH 的候选写回临时项目，保留期间新增的用户文件并重新验收；冲突链覆盖读取三方内容、产生新候选、独立评审、再次显式集成。其他测试覆盖去重、身份/版本拒绝、候选和上下文篡改、读取凭证撤销、失败/超时/输入改写、暂停竞态、重载、产物权限与分页、三方冲突、SQLite 恢复、真实子进程退出边界、取消、保留当前文件、需求继承上限、新工作项事务回滚、越界变更与漏评/重复需求 ID。这不等同于真实模型效果验收。
 
 测试只使用临时 DSH_HOME，不修改用户 DSH profile。测试生成的临时副本和状态在结束后清理。
 
@@ -82,13 +82,45 @@ dsh --profile web --patch C:\work\teamwork-dsh\examples\host.cordis.patch.yml
 
 | 工具 | 输入 |
 |---|---|
-| `teamwork_start` | `commandId`、`objective` |
+| `teamwork_start` | `commandId`、`objective`，可选 `spec: {requirements, writeScope}` |
 | `teamwork_status` | `runId` |
 | `teamwork_control` | `runId`、`commandId`、`expectedRevision`、`type: "cancel" / "pause" / "resume"`；仅 pause 可带 `mode` |
 | `teamwork_inspect` | `runId`、`kind: "artifacts" / "manifest" / "file" / "changes" / "integration" / "integrations"`，其他字段见下节 |
 | `teamwork_integrate` | `runId`、`commandId`、`expectedRevision`、`type: "integrate" / "cancel" / "abandon" / "resolve"`，计划/集成 ID 与决策字段见集成章节 |
 
 开始例子：`{"commandId":"fix-edge-001","objective":"修复边界行为并补充离线单元测试；不要安装依赖。"}`。保存返回的 runId；网络重试使用同一 commandId 和相同内容。取消前查询最新 revision。插件重载只重建连接，不启动第二个 Run。Runtime 重启会更新端口/令牌，随后重载 host 插件以重新读取连接文件。
+
+### 结构化需求与变更范围
+
+`teamwork_start` 和 POST runs 可接收 `spec`。完整调用示例见 `examples/start.scoped.example.json`，配合 sum 验收示例使用；它是 start 请求，不是 Runtime 配置：
+
+```json
+{
+  "commandId": "fix-sum-scoped-001",
+  "objective": "修复 sum 的空数组行为，保持其他求和行为，不安装依赖。",
+  "spec": {
+    "requirements": [
+      { "id": "empty", "text": "sum([]) 返回 0。" },
+      { "id": "addition", "text": "非空数值数组仍返回总和。" }
+    ],
+    "writeScope": { "files": ["sum.mjs"], "trees": [] }
+  }
+}
+```
+
+需求 ID 唯一，最多 100 项；每项 text 为 1–2,000 字符，总 text 长度最多 32,000。结构化需求是 objective 的补充，不替代目标。未知配置字段明确拒绝；不能通过 spec 修改 Runtime 的验收程序、增加修复预算或声称已经授权外部操作。
+
+writeScope 的 files 是精确文件路径，trees 是目录及其所有后代，各最多 200 项；列表取并集。路径区分大小写、使用 NFC Unicode 和 `/`，拒绝绝对路径、`..`、Windows ADS/device、反斜杠与通配符；`src` 不匹配 `src-other`。trees 的 `"."` 表示整个普通项目；files/trees 同时为空表示不允许任何最终变更。为授权路径新增必要父目录可以通过，但精确文件授权不允许把已有父目录删除或替换为文件；目录授权还要对每个实际子项变更检查。变更中的大小写/Unicode 别名保守拒绝。
+
+未传 spec 的新 Run 保存 `requirements: []` 和整个普通项目范围，保持旧 start 调用方式；需要缩小范围时必须明确提供 spec，host 不应擅自扩大用户给定范围。既有数据库中没有 spec 的旧记录按旧语义读取，不伪造历史范围检查。不要用旧 Runtime 读取新语义的数据目录。
+
+spec 保存在 `order.spec`，参与初始 inputDigest，随修复、暂停恢复和冲突解决工作项继承。正常动作没有修改 spec 的权限；resolve.instructions 也不能扩大文件范围。变更授权或需求版本修订的命令仍待实现。目前验收程序、轮数和 Attempt 超时仍由操作者的 Runtime 配置管理，而不是完整统一的 RunSpec 预算。
+
+Runtime 在确认实现者停止、固定副本后，对比原基线与候选，包括增删、内容、执行位、文件/目录类型变化；暂停快照和验证入口同样检查。在 `scopeCheck` 中记录 inputDigest、baselineDigest、candidateDigest 与 violations，只有与本 Attempt 输入和候选匹配的检查才能参与新 Gate。越界以 `SCOPE_VIOLATION` 失败，不自动重试、不标记 submitted/verified/paused；副本中的失败改动保留，源项目不会因此被写回。集成 prepare 还会独立检查同一候选范围，无关用户改动不作为候选越界。范围检查不能证明功能完成，仍必须通过其他 Gate 条件。
+
+有结构化需求时，独立评审的 `report.review.requirements` 必须为每个 ID 恰好提供一项，例如 `{"id":"empty","verdict":"pass","evidence":"sum.mjs 的空输入分支直接返回 0；已读取对应实现。"}`。evidence 为 1–2,000 字符，写具体观察与理由，不冒充 Runtime 命令执行结果。漏项、重复或未知 ID 返回 `REQUIREMENT_EVIDENCE_MISSING`，不自动修复；真实 fail 返回 `REQUIREMENT_REJECTED`，可按原有轮数预算修复。逐项报告仍是模型声明，必须同时满足独立命令、候选完整性及其他评审要求；未开启 verification 时只是报告收集，不会声称需求已验证。
+
+这些范围检查约束可接受的输出和显式集成，不会拦截每次 shell/OS 写入，也不会发现已经恢复原样的临时改动。工作副本不是 OS 沙箱；外部文件访问、网络/进程权限和更强隔离仍需操作者与后续平台能力管理。
 
 ## 状态含义
 
@@ -105,6 +137,8 @@ dsh --profile web --patch C:\work\teamwork-dsh\examples\host.cordis.patch.yml
 host 与 Runtime 应一起更新；hello 会报告 `verificationEnabled`、`maxIterations` 和 `bounded-repair` / `pause` / `resume` / `candidate-recovery` 能力。协议 0.1/0.2 的旧 host 会在握手时拒绝不匹配版本，避免默默开启新的工作流程。不要用旧 Runtime 打开含新状态的数据目录。
 
 所有请求使用 `Authorization: Bearer <scoped-token>`。写请求为 JSON，256 KiB 上限。仅监听 `127.0.0.1`，拒绝浏览器 Origin 与不匹配 Host，不开启 CORS。
+
+连接失败返回客户端 `TRANSPORT_ERROR`，附经过过滤的底层错误码，不输出令牌。网络失败不证明命令未被服务接受；客户端不会自动重发。需要核对状态或使用相同 commandId 和原内容显式重试，不能换 ID 重开工作。取消信号和超时仍保留原有异常语义。开发回归中观察到两次首次 loopback 请求失败，单项、300 次 Runtime 启停与简单同端口探测均未复现，根因尚未证实；新诊断用于继续定位，不能据此宣称该偶发问题已修复。
 
 | 路由 | 凭证与用途 |
 |---|---|

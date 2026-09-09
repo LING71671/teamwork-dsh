@@ -239,7 +239,11 @@ for (const scenario of ['queued', 'paused', 'tampered'] as const) test(`durable 
   let server: Awaited<ReturnType<typeof serve>> | undefined;
   try {
     const run = store.start({ commandId: 'start', objective: 'Fix' }, attemptsDirectory, {}, verification);
-    store.claim(run.id, 'initial-token'); store.move(run.id, 'running');
+    store.claim(run.id, 'initial-token');
+    const baselinePath = join(root, 'initial-baseline');
+    await snapshot(source, baselinePath, new AbortController().signal);
+    store.recordBaseline(run.id, { workspace: baselinePath, digest: await treeDigest(baselinePath, new AbortController().signal) });
+    store.move(run.id, 'running');
     await snapshot(source, run.order.workspace, new AbortController().signal);
     await writeFile(join(run.order.workspace, 'hello.txt'), 'fixed');
     store.bridge(run.order.attemptId, 'initial-token', 'submit', { commandId: 'submit', epoch: 1, inputDigest: run.order.inputDigest, report });

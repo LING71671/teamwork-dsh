@@ -5,7 +5,7 @@ import { setTimeout } from 'node:timers/promises';
 
 export const name = 'teamwork-offline-test-provider';
 export const inject = ['llm'];
-export function apply(ctx: Context, config: { repairDemo?: boolean; pauseDemo?: boolean; resolutionDemo?: boolean } = {}): void {
+export function apply(ctx: Context, config: { repairDemo?: boolean; pauseDemo?: boolean; resolutionDemo?: boolean; requirementDemo?: boolean } = {}): void {
   class OfflineAdapter extends LlmAdapter {
     private calls = 0;
     async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -31,7 +31,9 @@ export function apply(ctx: Context, config: { repairDemo?: boolean; pauseDemo?: 
         : step === 1 ? { file_path: 'hello.txt', content: reviewing ? 'forbidden reviewer edit' : implementationContent }
         : { commandId: `fixture-${index}`, report: {
           outcome: 'completed', summary: 'Offline DSH plugin integration exercise', unresolved: [],
-          ...(reviewing ? { review: { functionality: 'pass', completeness: 'pass', findings: [] } } : {}),
+          ...(reviewing ? { review: { functionality: 'pass', completeness: 'pass', findings: [], ...(config.requirementDemo ? {
+            requirements: [{ id: 'readback', verdict: 'pass', evidence: 'Read hello.txt through the actual read tool; content matches the requested text.' }],
+          } : {}) } } : {}),
         } };
       const block = { type: 'tool-call' as const, id: ToolCallId(`fixture-call-${index}`), name: toolName, arguments: JSON.stringify(args) };
       yield { type: 'block-start', index: 0, blockType: 'tool-call' };

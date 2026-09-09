@@ -19,7 +19,7 @@ for (const verification of [false, true, 'repair', 'pause', 'resolution'] as con
   const fixtureHome = await mkdtemp(join(tmpdir(), 'teamwork-dsh-integration-'));
   const patch = join(fixtureHome, 'offline.patch.yml');
   const provider = new URL('./fixtures/offline-provider.js', import.meta.url).href;
-  await writeFile(patch, `- insert:\n    - id: offline-test-provider\n      name: ${JSON.stringify(provider)}\n      inject: [llm]\n      config:\n        repairDemo: ${verification === 'repair'}\n        pauseDemo: ${verification === 'pause'}\n        resolutionDemo: ${verification === 'resolution'}\n`);
+  await writeFile(patch, `- insert:\n    - id: offline-test-provider\n      name: ${JSON.stringify(provider)}\n      inject: [llm]\n      config:\n        repairDemo: ${verification === 'repair'}\n        pauseDemo: ${verification === 'pause'}\n        resolutionDemo: ${verification === 'resolution'}\n        requirementDemo: ${verification === true}\n`);
   const actualBin = fileURLToPath(new URL('../../node_modules/@deepseek-ai/dsh/lib/bin.js', import.meta.url));
   await verifyDsh(actualBin);
   let diagnostic = '';
@@ -49,7 +49,9 @@ for (const verification of [false, true, 'repair', 'pause', 'resolution'] as con
     timeoutMs: 5_000,
   }] } : undefined, verification === true || verification === 'resolution');
   try {
-    const run = await f.client.start({ commandId: 'real-dsh', objective: 'Exercise offline plugin integration' });
+    const run = await f.client.start({ commandId: 'real-dsh', objective: 'Exercise offline plugin integration', ...(verification === true ? {
+      spec: { requirements: [{ id: 'readback', text: 'hello.txt must contain changed through real DSH tool' }], writeScope: { files: ['hello.txt'], trees: [] } },
+    } : {}) });
     if (verification === 'pause') {
       await waitFor(() => f.store.get(run.id).checkpoint ? true : undefined, 25_000);
       await f.client.control(run.id, { commandId: 'pause', type: 'pause', mode: 'interrupt', expectedRevision: f.store.get(run.id).revision });
@@ -92,6 +94,8 @@ for (const verification of [false, true, 'repair', 'pause', 'resolution'] as con
     assert.equal(await readFile(join(settled.order.workspace, 'hello.txt'), 'utf8'), 'changed through real DSH tool', diagnostic);
     assert.equal(await readFile(join(f.source, 'hello.txt'), 'utf8'), 'original');
     if (verification === true) {
+      assert.deepEqual(settled.scopeCheck?.violations, []);
+      assert.equal(settled.reviewAttempt?.report?.review?.requirements?.[0]?.id, 'readback');
       await writeFile(join(f.source, 'concurrent-user-file'), 'preserved by integration');
       const preview = await f.client.previewIntegration(run.id);
       const integration = await f.client.integrate(run.id, { commandId: 'integrate-real-dsh', type: 'integrate', planId: preview.id,

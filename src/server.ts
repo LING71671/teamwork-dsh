@@ -82,7 +82,7 @@ export async function serve(runtime: Runtime, token: string, port = 0): Promise<
     }
     if (!equal(auth, token)) throw new Fault('UNAUTHORIZED', 'Invalid host credential', 401);
     if (req.method === 'GET' && url.pathname === '/v1/hello') {
-      json(res, 200, { protocolVersion, features: ['start', 'status', 'cancel', 'pause', 'resume', 'checkpoint', 'submit', 'events', 'review-gate', 'bounded-repair', 'candidate-recovery', 'artifacts', 'changes', 'integration-preview', 'integration-status',
+      json(res, 200, { protocolVersion, features: ['start', 'status', 'cancel', 'pause', 'resume', 'checkpoint', 'submit', 'events', 'review-gate', 'structured-requirements', 'write-scope', 'bounded-repair', 'candidate-recovery', 'artifacts', 'changes', 'integration-preview', 'integration-status',
         ...(runtime.integrationEnabled ? ['integrate', 'integration-cancel', 'integration-keep-current', 'integration-resolve', 'resolution-context'] : [])],
         verificationEnabled: runtime.verificationEnabled,
         integrationEnabled: runtime.integrationEnabled,

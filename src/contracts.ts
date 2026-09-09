@@ -1,10 +1,26 @@
 import { z } from 'zod';
+import { portablePath } from './portable-path.js';
 
 export const protocolVersion = '0.3';
 export const identifier = z.string().min(1).max(128).regex(/^[a-zA-Z0-9_-]+$/);
+const scopePath = z.string().refine(path => portablePath(path) && path === path.normalize('NFC'), 'Use a normalized portable relative path, not a glob');
+export const writeScopeSchema = z.object({
+  files: z.array(scopePath).max(200),
+  trees: z.array(z.union([z.literal('.'), scopePath])).max(200),
+}).strict();
+export const runSpecSchema = z.object({
+  requirements: z.array(z.object({ id: identifier, text: z.string().trim().min(1).max(2000) }).strict()).max(100)
+    .refine(items => new Set(items.map(item => item.id)).size === items.length, 'Requirement IDs must be unique')
+    .refine(items => items.reduce((sum, item) => sum + item.text.length, 0) <= 32_000, 'Requirements exceed the character budget'),
+  writeScope: writeScopeSchema,
+}).strict();
+export type RunSpec = z.infer<typeof runSpecSchema>;
+export type WriteScope = RunSpec['writeScope'];
+export interface ScopeCheck { inputDigest: string; baselineDigest: string; candidateDigest: string; violations: string[] }
 export const startSchema = z.object({
   commandId: identifier,
   objective: z.string().trim().min(1).max(32_000),
+  spec: runSpecSchema.optional(),
 }).strict();
 export const cancelSchema = z.object({
   commandId: identifier,
@@ -31,6 +47,8 @@ export const reportSchema = z.object({
     functionality: z.enum(['pass', 'fail']),
     completeness: z.enum(['pass', 'fail']),
     findings: z.array(z.string().max(2_000)).max(100),
+    requirements: z.array(z.object({ id: identifier, verdict: z.enum(['pass', 'fail']),
+      evidence: z.string().trim().min(1).max(2000) }).strict()).max(100).optional(),
   }).strict().optional(),
 }).strict();
 export const verificationSchema = z.object({
@@ -146,6 +164,7 @@ export interface WorkOrder {
   inputDigest: string;
   inputTreeDigest?: string;
   objective: string;
+  spec?: RunSpec;
   workspace: string;
   role?: 'implementation' | 'review';
   candidateDigest?: string;
@@ -165,6 +184,7 @@ export interface RoundEvidence {
   reviewAttempt?: { order: WorkOrder; report?: Report; checkpoint?: Report };
   validation?: ValidationResult[];
   gateReasons?: string[];
+  scopeCheck?: ScopeCheck;
   finishedAt: string;
 }
 export interface Run {
@@ -184,6 +204,7 @@ export interface Run {
   reviewAttempt?: { order: WorkOrder; report?: Report; checkpoint?: Report };
   validation?: ValidationResult[];
   gateReasons?: string[];
+  scopeCheck?: ScopeCheck;
   // Optional for reading databases written before protocol 0.3; defaults to 1 / [].
   iteration?: number;
   history?: RoundEvidence[];

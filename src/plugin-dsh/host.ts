@@ -11,8 +11,11 @@ export function apply(ctx: Context): void {
   const client = clientFromEnvironment(false);
   // Registration only: a reload never starts work or owns the background Runtime.
   ctx.tools.register(tool('teamwork_start',
-    'Start a coding attempt in an independent workspace. Only call for user-authorized work. Reuse commandId on network retries. Returns immediately; submitted is NOT verified success.',
-    object({ commandId: string, objective: string }), async (args, exec) => {
+    'Start a coding attempt in an independent workspace. Only call for user-authorized work. Optional spec contains requirements [{id,text}] and writeScope {files,trees}: exact file paths and literal directory subtrees ("." means the ordinary project), not globs; empty lists prohibit changes. Preserve the user-authorized scope, never widen it on your own. Without spec, requirements are empty and scope is the ordinary project. Reuse commandId on network retries. Returns immediately; submitted is NOT verified success.',
+    object({ commandId: string, objective: string, spec: object({
+      requirements: { type: 'array', items: object({ id: string, text: string }) },
+      writeScope: object({ files: { type: 'array', items: string }, trees: { type: 'array', items: string } }),
+    }) }, ['commandId', 'objective']), async (args, exec) => {
       await client.hello(exec.signal);
       return client.start(startSchema.parse(args), exec.signal);
     }));
