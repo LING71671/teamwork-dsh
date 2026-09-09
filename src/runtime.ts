@@ -3,7 +3,7 @@ import { join, dirname } from 'node:path';
 import { Store, digest } from './store.js';
 import { Fault, type Executor, type StartCommand, type CancelCommand, type Run,
   type VerificationPolicy, type WorkOrder, type ValidationResult, type ControlCommand, type Candidate,
-  type IntegrationPolicy, type IntegrateCommand, type IntegrationStatus, type AbandonIntegrationCommand } from './contracts.js';
+  type IntegrationPolicy, type IntegrateCommand, type IntegrationStatus, type AbandonIntegrationCommand, type ResolveIntegrationCommand } from './contracts.js';
 import { activityPhase } from './kernel.js';
 import { snapshot, treeDigest, inputsUnchanged } from './workspace.js';
 import { runOwned } from './owned-execution.js';
@@ -11,6 +11,7 @@ import { validateCommand } from './validation.js';
 import { integrationPreview } from './integration-preview.js';
 import { IntegrationEngine } from './integration-engine.js';
 import { integrationRequest, integrationStatus } from './integration-journal.js';
+import { resolveIntegration } from './resolution.js';
 
 export interface RuntimeOptions {
   source: string;
@@ -28,7 +29,7 @@ export class Runtime {
   private closing = false;
   private url = '';
   private activeIntegration: { id: string; abort: AbortController; done: Promise<void> } | undefined;
-  private readonly preparation = new Set<Promise<IntegrationStatus>>();
+  private readonly preparation = new Set<Promise<unknown>>();
   private readonly shutdown = new AbortController();
   constructor(readonly store: Store, private readonly executor: Executor, private readonly options: RuntimeOptions) {
     if (options.integration?.enabled && !options.verification) throw new Fault('CONFIG_INVALID', 'Integration requires verification commands');
@@ -133,6 +134,26 @@ export class Runtime {
     this.preparation.add(task);
     try { return await task; } finally { this.preparation.delete(task); }
   }
+  async resolveIntegration(runId: string, id: string, input: ResolveIntegrationCommand, signal: AbortSignal): Promise<Run> {
+    if (!this.integrationEnabled) throw new Fault('CAPABILITY_MISSING', 'Integration resolution is disabled by the operator', 422);
+    if (this.closing) throw new Fault('UNAVAILABLE', 'Runtime is shutting down', 503);
+    const request = integrationRequest(runId, input, id), old = this.store.integrations.replay<Run>(request);
+    if (old) return old;
+    if (this.activeIntegration) throw new Fault('INTEGRATION_BUSY', 'Wait for the integration writer to stop');
+    const task = resolveIntegration(this.store, this.options.source, this.options.attemptsDirectory, this.options.executionProfile, runId, id, input,
+      AbortSignal.any([signal, this.shutdown.signal])).then(run => { queueMicrotask(() => this.pump()); return run; }).catch(error => {
+      const committed = this.store.integrations.replay<Run>(request); if (committed) return committed;
+      throw error;
+    });
+    this.preparation.add(task);
+    try { return await task; } finally { this.preparation.delete(task); }
+  }
+  private async checkResolution(run: Run, signal: AbortSignal): Promise<void> {
+    if (!run.order.resolution) return;
+    for (const input of Object.values(run.order.resolution.inputs)) {
+      if (await treeDigest(input.workspace, signal) !== input.digest) throw new Fault('RESOLUTION_CONTEXT_CHANGED', 'Registered resolution evidence changed');
+    }
+  }
   private pump(): void {
     if (this.closing || !this.url) return;
     if (this.activeIntegration) return;
@@ -169,7 +190,7 @@ export class Runtime {
     let implementationCompleted = false;
     try {
       if (run.phase === 'verification_starting') { await this.verify(run, abort); return; }
-      const base = run.order.resume?.candidate ?? run.order.repair?.candidate;
+      const base = run.order.resume?.candidate ?? run.order.repair?.candidate ?? run.order.resolution?.inputs.current;
       if (base) {
         if (await treeDigest(base.workspace, abort.signal) !== base.digest) {
           throw new Fault('CANDIDATE_CHANGED', 'Replacement base changed');
@@ -187,6 +208,7 @@ export class Runtime {
         run = this.store.recordBaseline(run.id, baseline);
       }
       const inputTreeDigest = await treeDigest(run.order.workspace, abort.signal);
+      await this.checkResolution(run, abort.signal);
       abort.signal.throwIfAborted();
       run = this.store.bindInput(run.id, inputTreeDigest);
       this.store.move(run.id, 'running');
@@ -261,6 +283,7 @@ export class Runtime {
   }
   private async verify(run: Run, abort: AbortController): Promise<void> {
     const signal = abort.signal;
+    await this.checkResolution(run, signal);
     const candidate = run.candidate;
     if (!candidate || await treeDigest(candidate.workspace, signal) !== candidate.digest) {
       throw new Fault('CANDIDATE_CHANGED', 'Queued verification candidate changed');
@@ -302,6 +325,7 @@ export class Runtime {
     signal.throwIfAborted();
     if (this.store.get(run.id).phase === 'pausing' && (!intact || !acceptanceIntegrity)) throw new Fault('CANDIDATE_CHANGED', 'Paused verification inputs changed');
     if (await this.pauseStopped(run.id, abort)) return;
+    await this.checkResolution(run, signal);
     this.store.finishGate(run.id, results, intact, acceptanceIntegrity);
   }
   async close(): Promise<void> {

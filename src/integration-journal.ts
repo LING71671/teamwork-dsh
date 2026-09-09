@@ -1,19 +1,19 @@
 import type { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
 import { Fault, type Candidate, type IntegrationPlan, type TreeEntry, type TreeManifest, type ValidationResult, type VerificationPolicy,
-  type IntegrationPhase, type IntegrationStatus, type IntegrateCommand, type CancelCommand, type AbandonIntegrationCommand } from './contracts.js';
+  type IntegrationPhase, type IntegrationStatus, type IntegrateCommand, type CancelCommand, type AbandonIntegrationCommand, type ResolveIntegrationCommand, type Run } from './contracts.js';
 
 export interface IntegrationRequest { commandId: string; digest: string }
-export const integrationRequest = (runId: string, command: IntegrateCommand | CancelCommand | AbandonIntegrationCommand, id?: string): IntegrationRequest => ({ commandId: command.commandId,
+export const integrationRequest = (runId: string, command: IntegrateCommand | CancelCommand | AbandonIntegrationCommand | ResolveIntegrationCommand, id?: string): IntegrationRequest => ({ commandId: command.commandId,
   digest: createHash('sha256').update(JSON.stringify(['integration', runId, command.type, command.expectedRevision, command.type === 'integrate' ? command.planId : id,
-    ...(command.type === 'abandon' ? [command.targetDigest, command.reason] : [])])).digest('hex') });
+    ...(command.type === 'abandon' ? [command.targetDigest, command.reason] : command.type === 'resolve' ? [command.planId, command.instructions] : [])])).digest('hex') });
 export function integrationStatus(record: IntegrationRecord): IntegrationStatus {
   return { id: record.id, runId: record.runId, revision: record.revision, phase: record.phase, planId: record.plan.id,
     completedEffects: record.effects.filter(e => e.state === 'done').length, totalEffects: record.effects.length,
     conflictCount: record.plan.changes.filter(c => c.disposition === 'conflict').length, cancelRequested: record.cancelRequested ?? false,
     recoveryDirectory: record.directory, validation: record.validation, ...(record.reason ? { reason: record.reason } : {}),
     ...(record.integrated ? { integrated: record.integrated } : {}), ...(record.resolution ? { resolution: record.resolution } : {}),
-    ...(record.commandStop ? { commandStop: record.commandStop } : {}) };
+    ...(record.commandStop ? { commandStop: record.commandStop } : {}), ...(record.resolutionRunId ? { resolutionRunId: record.resolutionRunId } : {}) };
 }
 
 export interface IntegrationEffect {
@@ -41,6 +41,8 @@ export interface IntegrationRecord {
   validation: ValidationResult[];
   commandIntent?: string;
   commandStop?: { commandId: string; proof: 'not-started' | 'direct-process-exited' };
+  resolutionRunId?: string;
+  resolutionRuns?: string[];
 }
 
 /** Same SQLite connection/transaction authority as Run state, not a second database.
@@ -58,13 +60,13 @@ export class IntegrationJournal {
     try { const value = body(); this.db.exec('COMMIT'); return value; }
     catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
-  replay(request: IntegrationRequest): IntegrationRecord | undefined {
+  replay<T = IntegrationRecord>(request: IntegrationRequest): T | undefined {
     const row = this.db.prepare('SELECT digest,response FROM commands WHERE id=?').get(`host:${request.commandId}`);
     if (!row) return undefined;
     if (row.digest !== request.digest) throw new Fault('IDEMPOTENCY_CONFLICT', 'Command ID reused with a different payload');
-    return JSON.parse(row.response as string) as IntegrationRecord;
+    return JSON.parse(row.response as string) as T;
   }
-  private receipt(request: IntegrationRequest, record: IntegrationRecord): void {
+  private receipt(request: IntegrationRequest, record: IntegrationRecord | Run): void {
     this.db.prepare('INSERT INTO commands VALUES(?,?,?)').run(`host:${request.commandId}`, request.digest, JSON.stringify(record));
   }
   create(record: IntegrationRecord, request?: IntegrationRequest): IntegrationRecord {
@@ -130,6 +132,25 @@ export class IntegrationJournal {
       const next = this.save({ ...record, revision: record.revision + 1, phase: 'abandoning', dispatch: 'pending',
         resolution: { kind: 'keep-current', targetDigest: command.targetDigest, reason: command.reason } }, 'integration.abandon_requested');
       this.receipt(request, next); return next;
+    });
+  }
+  resolve(runId: string, id: string, command: ResolveIntegrationCommand, create: () => Run): Run {
+    const request = integrationRequest(runId, command, id);
+    return this.transaction(() => {
+      const record = this.get(id);
+      if (record.runId !== runId) throw new Fault('NOT_FOUND', 'Integration is not in this run', 404);
+      const old = this.replay<Run>(request); if (old) return old;
+      if (record.revision !== command.expectedRevision) throw new Fault('REVISION_CONFLICT', 'Integration revision changed');
+      if (!record.authorized || !['conflict', 'abandoned'].includes(record.phase) || record.commandIntent) throw new Fault('RESOLUTION_NOT_READY', 'Resolve a preflight conflict, or first complete a safe keep-current decision');
+      if (this.unresolved()) throw new Fault('INTEGRATION_RECONCILIATION_REQUIRED', 'Resolve retained integration ownership first');
+      if (record.resolutionRunId) {
+        const previous = this.db.prepare('SELECT data FROM runs WHERE id=?').get(record.resolutionRunId);
+        if (!previous || !['failed', 'cancelled', 'rejected'].includes((JSON.parse(previous.data as string) as Run).phase)) throw new Fault('RESOLUTION_EXISTS', 'Use the existing resolution run; blocked execution requires reconciliation');
+      }
+      const run = create();
+      this.save({ ...record, revision: record.revision + 1, resolutionRunId: run.id,
+        resolutionRuns: [...(record.resolutionRuns ?? []), run.id] }, 'integration.resolution_created');
+      this.receipt(request, run); return run;
     });
   }
   update(id: string, revision: number, type: string, update: (record: IntegrationRecord) => IntegrationRecord): IntegrationRecord {

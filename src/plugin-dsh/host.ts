@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import '@deepseek-ai/dsh-tools';
 import { z } from 'zod';
-import { startSchema, controlSchema, identifier, pageSchema, filePageSchema, changePageSchema, integrationPageSchema, integrateSchema, cancelSchema, abandonIntegrationSchema } from '../contracts.js';
+import { startSchema, controlSchema, identifier, pageSchema, filePageSchema, changePageSchema, integrationPageSchema, integrateSchema, cancelSchema, abandonIntegrationSchema, resolveIntegrationSchema } from '../contracts.js';
 import { clientFromEnvironment, object, string, tool } from './shared.js';
 
 export const name = 'teamwork-host';
@@ -25,14 +25,16 @@ export function apply(ctx: Context): void {
     integrateSchema.extend({ runId: identifier }),
     cancelSchema.extend({ runId: identifier, integrationId: identifier }),
     abandonIntegrationSchema.extend({ runId: identifier, integrationId: identifier }),
+    resolveIntegrationSchema.extend({ runId: identifier, integrationId: identifier }),
   ]);
-  ctx.tools.register(tool('teamwork_integrate', 'Apply a user-authorized verified candidate, cancel its integration, or explicitly abandon a stopped failed integration while KEEPING current project files and backups. Requires operator-enabled integration. Inspect kind integration first: type integrate needs planId and current RUN revision. Cancel/abandon need integrationId and current INTEGRATION revision. Abandon also needs current preview targetDigest and a reason; only call when the user explicitly chose to keep current files, NOT to retry, restore or claim success. Unknown command processes cannot be abandoned. Reuse commandId/payload on retries. Never infer write or keep-current permission from inspection requests.',
-    object({ runId: string, commandId: string, expectedRevision: { type: 'integer' }, type: { type: 'string', enum: ['integrate', 'cancel', 'abandon'] },
-      planId: string, integrationId: string, targetDigest: string, reason: string }, ['runId', 'commandId', 'expectedRevision', 'type']), async (args, exec) => {
+  ctx.tools.register(tool('teamwork_integrate', 'For user-authorized work: integrate a verified candidate, cancel integration, abandon while KEEPING current files/backups, or resolve conflicts in a NEW implementation/review Run (may incur model cost; no automatic writeback). Requires operator-enabled integration. Inspect kind integration first. Integrate needs planId and current RUN revision. Cancel/abandon/resolve need integrationId and current INTEGRATION revision. Resolve also needs current preview planId and explicit resolution instructions; use the returned new runId. Abandon needs current targetDigest and reason; only for an explicit user keep-current decision, never to retry, restore or claim success. Unknown processes cannot be cleared this way. Reuse commandId/payload on retries. Inspection does not imply write, keep-current or new-model-work permission.',
+    object({ runId: string, commandId: string, expectedRevision: { type: 'integer' }, type: { type: 'string', enum: ['integrate', 'cancel', 'abandon', 'resolve'] },
+      planId: string, integrationId: string, targetDigest: string, reason: string, instructions: string }, ['runId', 'commandId', 'expectedRevision', 'type']), async (args, exec) => {
       const { runId, ...input } = integrationControl.parse(args);
       await client.hello(exec.signal);
       if (input.type === 'integrate') return client.integrate(runId, input, exec.signal);
       const { integrationId, ...command } = input;
+      if (command.type === 'resolve') return client.resolveIntegration(runId, integrationId, command, exec.signal);
       if (command.type === 'abandon') return client.abandonIntegration(runId, integrationId, command, exec.signal);
       return client.cancelIntegration(runId, integrationId, command, exec.signal);
     }));

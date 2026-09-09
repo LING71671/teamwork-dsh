@@ -17,8 +17,10 @@ export const controlSchema = z.discriminatedUnion('type', [cancelSchema, pauseSc
 export const integrationPolicySchema = z.object({ enabled: z.boolean() }).strict();
 export const integrateSchema = cancelSchema.extend({ type: z.literal('integrate'), planId: z.string().regex(/^[a-f0-9]{64}$/) });
 export const abandonIntegrationSchema = cancelSchema.extend({ type: z.literal('abandon'), targetDigest: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().trim().min(1).max(2000) });
+export const resolveIntegrationSchema = cancelSchema.extend({ type: z.literal('resolve'), planId: z.string().regex(/^[a-f0-9]{64}$/), instructions: z.string().trim().min(1).max(16_000) });
 export type IntegrateCommand = z.infer<typeof integrateSchema>;
 export type AbandonIntegrationCommand = z.infer<typeof abandonIntegrationSchema>;
+export type ResolveIntegrationCommand = z.infer<typeof resolveIntegrationSchema>;
 export type IntegrationPolicy = z.infer<typeof integrationPolicySchema>;
 export const reportSchema = z.object({
   outcome: z.enum(['completed', 'incomplete']),
@@ -44,7 +46,7 @@ export const verificationSchema = z.object({
 export type VerificationPolicy = z.infer<typeof verificationSchema>;
 export interface Candidate { workspace: string; digest: string; artifactId?: string }
 export interface ArtifactDescriptor {
-  id: string; runId: string; kind: 'baseline' | 'candidate' | 'checkpoint' | 'integrated'; digest: string; attemptId: string; createdAt: string;
+  id: string; runId: string; kind: 'baseline' | 'candidate' | 'checkpoint' | 'integrated' | 'context'; digest: string; attemptId: string; createdAt: string;
 }
 export type TreeEntry = { path: string; kind: 'directory' } |
   { path: string; kind: 'file'; size: number; executable: number; digest: string };
@@ -85,6 +87,7 @@ export interface IntegrationStatus {
   integrated?: Candidate; validation: ValidationResult[];
   resolution?: { kind: 'keep-current'; targetDigest: string; reason: string };
   commandStop?: { commandId: string; proof: 'not-started' | 'direct-process-exited' };
+  resolutionRunId?: string;
 }
 export const pageSchema = z.object({ offset: z.coerce.number().int().min(0).max(1_000_000).default(0),
   limit: z.coerce.number().int().min(1).max(500).default(100) }).strict();
@@ -92,6 +95,22 @@ export const filePageSchema = z.object({ path: z.string().min(1).max(2048), offs
   length: z.coerce.number().int().min(1).max(65_536).default(16_384) }).strict();
 export const changePageSchema = pageSchema.extend({ artifactId: identifier.optional() });
 export const integrationPageSchema = changePageSchema.extend({ planId: z.string().regex(/^[a-f0-9]{64}$/).optional() });
+export const contextVersionSchema = z.enum(['base', 'proposal', 'current']);
+export type ContextVersion = z.infer<typeof contextVersionSchema>;
+export const contextQuerySchema = z.discriminatedUnion('kind', [
+  pageSchema.extend({ kind: z.literal('conflicts') }),
+  pageSchema.extend({ kind: z.literal('manifest'), version: contextVersionSchema }),
+  filePageSchema.extend({ kind: z.literal('file'), version: contextVersionSchema }),
+]);
+export type ContextQuery = z.infer<typeof contextQuerySchema>;
+export type ContextResult = ArtifactPage | ArtifactFile | { conflicts: IntegrationChange[]; total: number; nextOffset: number | null };
+export interface ResolutionContext {
+  parentRunId: string; integrationId: string; planId: string;
+  requirements: string[];
+  feedback: string;
+  inputs: Record<ContextVersion, Candidate>;
+  conflicts: IntegrationChange[];
+}
 export interface ValidationResult {
   commandId: string;
   status: 'passed' | 'failed' | 'timed_out' | 'spawn_failed';
@@ -132,6 +151,7 @@ export interface WorkOrder {
   candidateDigest?: string;
   repair?: { candidate: Candidate; feedback: string };
   resume?: { previousAttemptId: string; candidate?: Candidate; checkpoint?: Report };
+  resolution?: ResolutionContext;
 }
 export type PauseContinuation = { kind: 'queued'; phase: 'queued' | 'repair_queued' | 'verification_queued' } |
   { kind: 'implementation'; candidate?: Candidate } | { kind: 'verification'; candidate: Candidate } |

@@ -1,5 +1,6 @@
 import { Fault, protocolVersion, type Run, type StartCommand, type CancelCommand, type BridgeCommand, type ControlCommand,
-  type ArtifactDescriptor, type ArtifactPage, type ArtifactFile, type ChangePage, type IntegrationPreview, type IntegrateCommand, type IntegrationStatus, type AbandonIntegrationCommand } from './contracts.js';
+  type ArtifactDescriptor, type ArtifactPage, type ArtifactFile, type ChangePage, type IntegrationPreview, type IntegrateCommand, type IntegrationStatus, type AbandonIntegrationCommand,
+  type ResolveIntegrationCommand, type ContextQuery, type ContextResult } from './contracts.js';
 
 export class Client {
   private readonly url: string;
@@ -67,6 +68,13 @@ export class Client {
   }
   abandonIntegration(id: string, integrationId: string, input: AbandonIntegrationCommand, signal?: AbortSignal): Promise<IntegrationStatus> {
     return this.request(`/v1/runs/${encodeURIComponent(id)}/integrations/${encodeURIComponent(integrationId)}/commands`, input, signal);
+  }
+  resolveIntegration(id: string, integrationId: string, input: ResolveIntegrationCommand, signal?: AbortSignal): Promise<Run> {
+    return this.request(`/v1/runs/${encodeURIComponent(id)}/integrations/${encodeURIComponent(integrationId)}/commands`, input, signal);
+  }
+  context(attemptId: string, input: ContextQuery, signal?: AbortSignal): Promise<ContextResult> {
+    const query = new URLSearchParams(Object.entries(input).map(([key, value]) => [key, String(value)]));
+    return this.request(`/v1/attempts/${encodeURIComponent(attemptId)}/context?${query}`, undefined, signal);
   }
   bridge(id: string, kind: 'checkpoint' | 'submit', input: BridgeCommand, signal?: AbortSignal): Promise<{ accepted: true; runId: string; revision: number }> {
     return this.request(`/v1/attempts/${encodeURIComponent(id)}/${kind}`, input, signal);

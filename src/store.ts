@@ -3,7 +3,8 @@ import { createHash, randomUUID } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { Fault, terminal, type Run, type Event, type StartCommand, type CancelCommand,
   type BridgeCommand, type Phase, type VerificationPolicy, type Candidate, type WorkOrder, type ValidationResult,
-  type PauseCommand, type ResumeCommand, type PauseContinuation, type RoundEvidence, type ArtifactDescriptor } from './contracts.js';
+  type PauseCommand, type ResumeCommand, type PauseContinuation, type RoundEvidence, type ArtifactDescriptor, type ResolveIntegrationCommand,
+  type ResolutionContext } from './contracts.js';
 import { activityPhase, evaluateGate, receive, transition, repairEligible, repairFeedback } from './kernel.js';
 import { IntegrationJournal, integrationStatus } from './integration-journal.js';
 
@@ -154,6 +155,41 @@ export class Store {
       this.db.prepare('INSERT INTO outbox VALUES(?,?)').run(id, 'pending');
       return run;
     });
+  }
+  resolveIntegration(parentId: string, integrationId: string, input: ResolveIntegrationCommand, workspace: string,
+    executionProfile: unknown, context: ResolutionContext): Run {
+    return this.integrations.resolve(parentId, integrationId, input, () => {
+      const parent = this.get(parentId);
+      if (parent.phase !== 'verified' || parent.gate !== 'passed' || !parent.verification ||
+        parent.candidate?.digest !== context.inputs.proposal.digest || parent.baseline?.digest !== context.inputs.base.digest) {
+        throw new Fault('INTEGRATION_GATE_STALE', 'Parent candidate or baseline changed');
+      }
+      if (context.parentRunId !== parentId || context.integrationId !== integrationId || context.planId !== input.planId) throw new Fault('RESOLUTION_IDENTITY', 'Resolution inputs do not match the command');
+      const id = randomUUID(), attemptId = randomUUID(), at = new Date().toISOString();
+      let run: Run = { id, revision: 0, phase: 'queued', gate: 'not_evaluated', iteration: 1, history: [], createdAt: at, updatedAt: at,
+        verification: parent.verification,
+        order: { runId: id, workItemId: randomUUID(), attemptId, dispatchKey: randomUUID(), epoch: 1, specRevision: parent.order.specRevision + 1,
+          objective: parent.order.objective, workspace: join(workspace, attemptId, 'work'), inputDigest: '', resolution: context } };
+      const current = this.registerArtifact(run, context.inputs.current, 'baseline');
+      const resolution: ResolutionContext = { ...context, inputs: {
+        current, base: this.registerArtifact(run, context.inputs.base, 'context'), proposal: this.registerArtifact(run, context.inputs.proposal, 'context'),
+      } };
+      run = { ...run, baseline: current, order: { ...run.order, resolution,
+        inputDigest: digest(canonical({ parentInput: parent.order.inputDigest, resolution, executionProfile, verification: parent.verification })) } };
+      this.save(run, 'run.resolution_created');
+      this.db.prepare('INSERT INTO outbox VALUES(?,?)').run(id, 'pending');
+      return run;
+    });
+  }
+  contextScope(attemptId: string, token: string): { runId: string; context: ResolutionContext } {
+    const credential = this.db.prepare('SELECT run_id,hash FROM credentials WHERE attempt_id=?').get(attemptId);
+    if (!credential || credential.hash !== digest(token)) throw new Fault('UNAUTHORIZED', 'Invalid attempt credential', 401);
+    const run = this.get(credential.run_id as string), review = run.reviewAttempt?.order.attemptId === attemptId;
+    const order = review ? run.reviewAttempt!.order : run.order;
+    if (order.attemptId !== attemptId || activityPhase(run) !== (review ? 'reviewing' : 'running') ||
+      (run.phase === 'pausing' && run.pause?.mode !== 'drain') || (review ? run.reviewAttempt!.report : run.report)) throw new Fault('RESULT_STALE', 'Attempt is no longer allowed to inspect resolution inputs');
+    if (!order.resolution) throw new Fault('CONTEXT_MISSING', 'This attempt has no registered resolution context', 403);
+    return { runId: run.id, context: order.resolution };
   }
   pending(): string[] {
     return this.db.prepare("SELECT run_id FROM outbox JOIN runs ON runs.id=outbox.run_id WHERE state='pending' ORDER BY json_extract(runs.data,'$.updatedAt'),run_id")

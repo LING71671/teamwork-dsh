@@ -3,7 +3,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { ZodError } from 'zod';
 import { Runtime } from './runtime.js';
 import { Fault, protocolVersion, startSchema, controlSchema, bridgeSchema, pageSchema, filePageSchema, changePageSchema, integrationPageSchema,
-  integrateSchema, cancelSchema, abandonIntegrationSchema } from './contracts.js';
+  integrateSchema, cancelSchema, abandonIntegrationSchema, resolveIntegrationSchema, contextQuerySchema, type ContextResult } from './contracts.js';
 import { artifactManifest, artifactFile, artifactChanges } from './artifacts.js';
 
 async function body(req: IncomingMessage): Promise<unknown> {
@@ -60,6 +60,20 @@ export async function serve(runtime: Runtime, token: string, port = 0): Promise<
     }
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     const auth = req.headers.authorization?.match(/^Bearer ([^\s]+)$/)?.[1] ?? '';
+    const context = /^\/v1\/attempts\/([a-zA-Z0-9_-]+)\/context$/.exec(url.pathname);
+    if (context && req.method === 'GET') {
+      const attemptId = context[1]!, scope = runtime.store.contextScope(attemptId, auth);
+      const query = Object.fromEntries(url.searchParams);
+      if (Object.keys(query).length !== [...url.searchParams].length) throw new Fault('SCHEMA_INVALID', 'Duplicate query parameters', 400);
+      const input = contextQuerySchema.parse(query);
+      const result = input.kind === 'conflicts' ? { conflicts: scope.context.conflicts.slice(input.offset, input.offset + input.limit), total: scope.context.conflicts.length,
+        nextOffset: input.offset + input.limit < scope.context.conflicts.length ? input.offset + input.limit : null }
+        : await inspect<ContextResult>(res, signal => input.kind === 'manifest'
+          ? artifactManifest(runtime.store, scope.runId, scope.context.inputs[input.version].artifactId!, input.offset, input.limit, signal)
+          : artifactFile(runtime.store, scope.runId, scope.context.inputs[input.version].artifactId!, input.path, input.offset, input.length, signal));
+      runtime.store.contextScope(attemptId, auth); // Cancellation/epoch replacement can revoke an in-flight read.
+      json(res, 200, result); return;
+    }
     const worker = /^\/v1\/attempts\/([a-zA-Z0-9_-]+)\/(checkpoint|submit)$/.exec(url.pathname);
     if (worker && req.method === 'POST') {
       const run = runtime.store.bridge(worker[1]!, auth, worker[2] as 'checkpoint' | 'submit', bridgeSchema.parse(await body(req)));
@@ -69,7 +83,7 @@ export async function serve(runtime: Runtime, token: string, port = 0): Promise<
     if (!equal(auth, token)) throw new Fault('UNAUTHORIZED', 'Invalid host credential', 401);
     if (req.method === 'GET' && url.pathname === '/v1/hello') {
       json(res, 200, { protocolVersion, features: ['start', 'status', 'cancel', 'pause', 'resume', 'checkpoint', 'submit', 'events', 'review-gate', 'bounded-repair', 'candidate-recovery', 'artifacts', 'changes', 'integration-preview', 'integration-status',
-        ...(runtime.integrationEnabled ? ['integrate', 'integration-cancel', 'integration-keep-current'] : [])],
+        ...(runtime.integrationEnabled ? ['integrate', 'integration-cancel', 'integration-keep-current', 'integration-resolve', 'resolution-context'] : [])],
         verificationEnabled: runtime.verificationEnabled,
         integrationEnabled: runtime.integrationEnabled,
         maxIterations: runtime.maxIterations,
@@ -88,6 +102,10 @@ export async function serve(runtime: Runtime, token: string, port = 0): Promise<
       }
       if (req.method === 'POST' && id && integration[3]) {
         const input = await body(req);
+        if (typeof input === 'object' && input !== null && 'type' in input && input.type === 'resolve') {
+          const command = resolveIntegrationSchema.parse(input);
+          json(res, 202, await inspect(res, signal => runtime.resolveIntegration(runId, id, command, signal))); return;
+        }
         if (typeof input === 'object' && input !== null && 'type' in input && input.type === 'abandon') {
           const command = abandonIntegrationSchema.parse(input);
           json(res, 202, await inspect(res, signal => runtime.abandonIntegration(runId, id, command, signal))); return;

@@ -4,7 +4,7 @@
 
 已经实现：独立 Runtime、SQLite 状态/事件/命令去重/outbox、host 工具、worker checkpoint/submit、每 Attempt 一个 DSH SDK 进程、工作副本、取消与超时、SSE 事件补读、保守重启恢复、内容摘要绑定的 Candidate 快照、全新只读评审 Attempt、独立验收命令及确定性 Gate。
 
-已加入显式启用的集成、最终验收与有条件的保留当前文件处理。尚未实现：冲突解决工作项、slash commands、OpenCode/Pi 适配。产物已有分页读取和变更清单，尚无批量压缩包导出。不会把未实现能力显示成成功。完整开发的剩余方向见 [ROADMAP.md](./ROADMAP.md)。
+已加入显式启用的集成、最终验收、有条件的保留当前文件处理及冲突解决工作项。尚未实现：完整 RunSpec、未知进程强证据对账、slash commands、OpenCode/Pi 适配。产物已有分页读取和变更清单，尚无批量压缩包导出。不会把未实现能力显示成成功。完整开发的剩余方向见 [ROADMAP.md](./ROADMAP.md)。
 
 ## 开发和验证
 
@@ -16,7 +16,7 @@ npm ci --registry=https://registry.npmjs.org
 npm test
 ```
 
-目前有 124 项自动化测试。真实 DSH 测试覆盖单实现者、完整评审/Gate、四进程失败修复链，以及“checkpoint → 中断并确认退出 → 新实现者 → 新评审 → 验收”三进程恢复链；离线 LLM adapter 调用真实工具，不发送网络模型请求、不需要 API key。显式集成测试进一步将真实 DSH 的候选写回临时项目，保留期间新增的用户文件并重新验收。其他测试覆盖去重、身份/版本拒绝、候选篡改、失败/超时/输入改写、暂停竞态、重载、产物权限与分页、三方冲突、SQLite 恢复、真实子进程退出边界、取消和保留当前文件处理。这不等同于真实模型效果验收。
+目前有 138 项自动化测试。真实 DSH 测试覆盖单实现者、完整评审/Gate、四进程失败修复链，以及“checkpoint → 中断并确认退出 → 新实现者 → 新评审 → 验收”三进程恢复链；离线 LLM adapter 调用真实工具，不发送网络模型请求、不需要 API key。显式集成测试进一步将真实 DSH 的候选写回临时项目，保留期间新增的用户文件并重新验收；冲突链覆盖读取三方内容、产生新候选、独立评审、再次显式集成。其他测试覆盖去重、身份/版本拒绝、候选和上下文篡改、读取凭证撤销、失败/超时/输入改写、暂停竞态、重载、产物权限与分页、三方冲突、SQLite 恢复、真实子进程退出边界、取消、保留当前文件、需求继承上限和新工作项事务回滚。这不等同于真实模型效果验收。
 
 测试只使用临时 DSH_HOME，不修改用户 DSH profile。测试生成的临时副本和状态在结束后清理。
 
@@ -86,7 +86,7 @@ dsh --profile web --patch C:\work\teamwork-dsh\examples\host.cordis.patch.yml
 | `teamwork_status` | `runId` |
 | `teamwork_control` | `runId`、`commandId`、`expectedRevision`、`type: "cancel" / "pause" / "resume"`；仅 pause 可带 `mode` |
 | `teamwork_inspect` | `runId`、`kind: "artifacts" / "manifest" / "file" / "changes" / "integration" / "integrations"`，其他字段见下节 |
-| `teamwork_integrate` | `runId`、`commandId`、`expectedRevision`、`type: "integrate" / "cancel" / "abandon"`，计划/集成 ID 与决策字段见集成章节 |
+| `teamwork_integrate` | `runId`、`commandId`、`expectedRevision`、`type: "integrate" / "cancel" / "abandon" / "resolve"`，计划/集成 ID 与决策字段见集成章节 |
 
 开始例子：`{"commandId":"fix-edge-001","objective":"修复边界行为并补充离线单元测试；不要安装依赖。"}`。保存返回的 runId；网络重试使用同一 commandId 和相同内容。取消前查询最新 revision。插件重载只重建连接，不启动第二个 Run。Runtime 重启会更新端口/令牌，随后重载 host 插件以重新读取连接文件。
 
@@ -121,7 +121,8 @@ host 与 Runtime 应一起更新；hello 会报告 `verificationEnabled`、`maxI
 | `POST /v1/runs/{runId}/integrations` | host；显式集成，配置启用且当前候选通过 Gate 才接受 |
 | `GET /v1/runs/{runId}/integrations` | host；分页查询本 Run 的集成历史 |
 | `GET /v1/runs/{runId}/integrations/{integrationId}` | host；最新集成状态、最终验收、恢复目录与产物引用 |
-| `POST /v1/runs/{runId}/integrations/{integrationId}/commands` | host；cancel 或显式 abandon/保留当前文件 |
+| `POST /v1/runs/{runId}/integrations/{integrationId}/commands` | host；cancel、abandon/保留当前文件或 resolve/返回新 Run |
+| `GET /v1/attempts/{attemptId}/context` | 活动解决者/评审者独有凭证；只读三方上下文，kind 与 version 见下文 |
 | `POST /v1/attempts/{attemptId}/checkpoint` | 该 Attempt 独有凭证 |
 | `POST /v1/attempts/{attemptId}/submit` | 该 Attempt 独有凭证 |
 
@@ -151,7 +152,7 @@ worker 从进程环境绑定 epoch、inputDigest 和根 session ID，不允许�
 
 ### 启用与发起集成
 
-默认不启用集成。操作者在新数据目录的 Runtime 配置中加入 `"integration": {"enabled": true}`，且必须配置 verification。完整示例见 `examples/runtime.integration.example.json`。hello 返回 integrationEnabled；只有启用时才报告 integrate、integration-cancel、integration-keep-current。配置启用只是允许显式命令，Gate 通过、插件加载和状态查询都不自动写回。
+默认不启用集成。操作者在新数据目录的 Runtime 配置中加入 `"integration": {"enabled": true}`，且必须配置 verification。完整示例见 `examples/runtime.integration.example.json`。hello 返回 integrationEnabled；只有启用时才报告 integrate、integration-cancel、integration-keep-current、integration-resolve、resolution-context。配置启用只是允许显式命令，Gate 通过、插件加载和状态查询都不自动写回。
 
 用户授权写回后，先调用 `teamwork_inspect`（kind integration）取得 planId，即预览返回的 id；再调用 `teamwork_integrate`，例如 `{"runId":"...","commandId":"integrate-001","type":"integrate","expectedRevision":42,"planId":"<64位摘要>"}`。expectedRevision 是最新 **Run revision**，不是预览计划 ID 或集成 revision。HTTP 对应 POST integrations，省略 body 内 runId。模型不能提供目标目录、修改验收命令或跳过 Gate。重复/并发请求以同 commandId 和完全相同内容得到持久回执；回执是接受时的状态，不是最新执行状态。
 
@@ -175,9 +176,39 @@ Runtime 等当前模型 Attempt 排空后串行集成，期间不派发新工作
 
 用户明确选择放弃这次集成、保留当前项目时，可对已停止的 failed/blocked 集成调用 `teamwork_integrate`，type abandon，附 integrationId、最新 Integration revision、当前集成预览的 targetDigest 和非空 reason。此操作不重试、不回滚、不删除备份，也不表示任务成功。它仅在当前项目摘要仍匹配时释放**该次集成自己**的 reservation 和源租约，状态从 abandoning 到 abandoned，允许后续显式工作。
 
-退出未知的 commandIntent 不能用 abandon 清除，文字说明不能替代退出证据；仍在执行的 writer 也不能被 abandon。foreign reservation 不会被抢占或删除。决策和命令回执先持久化，释放 reservation 后发生进程退出可恢复完成，不重复改写项目。若期间用户又修改项目，报告过期并保留占用，需重新检查后提交新决策。恢复目录在 recoveryDirectory；备份仍保留供人工检查。未知进程的强证据对账、恢复/还原选项和冲突解决工作项仍待开发。
+退出未知的 commandIntent 不能用 abandon 清除，文字说明不能替代退出证据；仍在执行的 writer 也不能被 abandon。foreign reservation 不会被抢占或删除。决策和命令回执先持久化，释放 reservation 后发生进程退出可恢复完成，不重复改写项目。若期间用户又修改项目，报告过期并保留占用，需重新检查后提交新决策。恢复目录在 recoveryDirectory；备份仍保留供人工检查。未知进程的强证据对账及恢复/还原选项仍待开发。
 
 这些保证针对合作式本地任务与进程崩溃，不是整棵树的原子事务、断电持久性保证或对抗同一 OS 用户恶意文件系统竞争的沙箱。Windows 权限依赖继承 ACL。原文件备份不会自动删除；后续需要独立的留存/清理策略。
+
+### 创建冲突解决工作项
+
+用户授权解决冲突后，对已记录的 `conflict` 集成调用 `teamwork_integrate`，type resolve。先刷新 `teamwork_inspect`（kind integration）取得当前 planId，并查询集成最新 revision。示例：
+
+```json
+{
+  "runId": "<父 Run ID>",
+  "integrationId": "<冲突集成 ID>",
+  "commandId": "resolve-001",
+  "type": "resolve",
+  "expectedRevision": 1,
+  "planId": "<当前预览的 64 位摘要>",
+  "instructions": "保留用户增加的边界处理，同时合入原候选的功能；不要安装依赖。"
+}
+```
+
+expectedRevision 是实际查询到的 **Integration revision**，示例值不能照抄。HTTP 对应 POST integration commands，省略 body 中的 runId/integrationId。响应为 HTTP 202 和**新 Run**，不是旧集成状态；后续查询和控制使用该新 Run 的 id。旧集成保持 conflict/abandoned，不会被重写成成功；其 resolutionRunId 指向最新解决工作项。相同 commandId/内容重试重放原新 Run 回执，不重复启动模型。
+
+failed/blocked 集成必须先满足退出证据要求，并由用户显式完成 abandon/保留当前文件决策，达到 abandoned 后才能 resolve。此时即使没有文件级冲突，也可处理最终验收失败等语义问题。未解决源租约、活动集成或未知 commandIntent 不能通过创建工作项绕过。若旧 conflict 对应的当前冲突已消失，resolve 返回 CONFLICTS_CLEARED，应重新检查并另行授权集成。
+
+新工作项继承原 objective 和操作者验收策略，创建全新 Run/WorkItem/Attempt，specRevision 递增，初始 epoch 为 1。它从 resolve 时冻结的**当前用户项目**开始，不从旧 proposal 开始，也不直接改写原项目。该当前副本成为新 Run 基线；旧 base/proposal 作为登记的只读上下文引用。新 Run、三方产物登记、outbox、父集成关联、事件和命令回执在同一 SQLite 事务提交，失败时一起回滚。准备期间失败可能保留未登记副本，但不会派发它或写回项目。
+
+实现者和全新只读评审者额外获得 `teamwork_context`：`kind: conflicts` 分页列出冲突；`kind: manifest` 需 `version: base / proposal / current`；`kind: file` 还需标准化相对 path。分页参数与产物接口相同，不接受任意 artifactId、外部目录或跨工作项凭证。普通 worker 不加载此工具；活动凭证只允许读自己的登记上下文，submit、取消、interrupt 或 epoch 替换后拒绝旧读者。读文件时校验登记摘要，派发和新 Gate 前也检查全部三方输入。副本仍是逻辑冻结，不是 OS 不可写文件。
+
+解决者必须保留用户改动并考虑旧 proposal 中未冲突的功能，不能只处理冲突列表后丢弃其余目标。新评审独立检查原目标、三方参考与附加需求，新验收重新执行；旧评审和旧命令结果不作为新 Gate 证据。此前集成诊断最多 16,000 字符，只是未信任提示。每次 instructions 为 1–16,000 字符；多代解决工作项继承所有附加需求，按换行拼接计最多 32,000 字符，超限明确返回 RESOLUTION_BUDGET，不静默截断。
+
+新 Run 支持有限修复、暂停和恢复；排队后重启仍使用已冻结的 current，而不吸收后来的源项目改动。同一集成已有活动、paused、verified 或 blocked 的解决工作项时拒绝重复创建；只有上一个 failed/cancelled/rejected 后才能另行显式创建替代项。resolve 会启动新的模型工作并可能产生费用，不自动循环。
+
+新候选通过 Gate 后，必须针对**新 Run**重新预览并显式发起 integrate，最终合并树再验收通过才算该次集成成功。期间用户再次修改相同文件会产生新的冲突，需要新的明确决策。这不是自动文本合并、自动覆盖或备份还原功能。
 
 ## 恢复与边界
 
@@ -201,7 +232,7 @@ Runtime 等当前模型 Attempt 排空后串行集成，期间不派发新工作
 - 副本不是操作系统沙箱，复制期间也不是原目录的原子快照。DSH 自身的 sandbox/approval 策略仍然有效；只有显式配置了硬隔离，才有对应安全保证。
 - 实现者 guard 限制已知读写/搜索/shell/报告工具及 PTC 传输，拒绝其他工具和 `run_in_background`。评审者强制使用 native 工具呈现，只允许读/搜索/报告，禁止 shell、写入和代码执行。shell 和验收命令仍可能产生外部进程；本版本只确认所拥有的直接进程，不保证逃逸子进程的回收。
 - `connection.json` 是 host 管理凭证；不要提交到仓库或提供给模型。目录访问权限在 Windows 上依赖 ACL，Unix mode 不能代替 Windows ACL。该实现不防御同一 OS 用户下恶意进程读取文件或环境。
-- 显式集成、最终验收、文件 effect 恢复和保留当前文件处理已接入 Runtime/DSH；未知进程强证据对账、冲突解决和完整首版发布门槛仍未完成。
+- 显式集成、最终验收、文件 effect 恢复、保留当前文件处理及新冲突解决工作项已接入 Runtime/DSH；未知进程强证据对账、完整 RunSpec 和完整首版发布门槛仍未完成。
 
 ## 源码边界
 

@@ -18,7 +18,9 @@
 - Operator opt-in (`integration.enabled`, requiring verification), explicit `teamwork_integrate`/HTTP commands, durable command receipts, serial Runtime scheduling, cancellation, and authorized restart dispatch. Gate alone never triggers writeback.
 - Integration status and events project transactionally into Run state; final snapshots register as `integrated` artifacts. Run.phase remains verified; inspect Run.integration.phase for the independent integration outcome.
 - Explicit keep-current resolution for stopped failed integrations, with revision/target-digest checks, retained files/backups, owned-reservation-only release and durable recovery. Unknown command dispatch cannot be cleared by this decision.
-- 124 tests locally, including actual DSH output → explicit integration → final acceptance with user changes preserved, plus host tools, concurrent command retries, queued/active cancellation and keep-current recovery. Not part of v0.2.0-dev.1.
+- Explicit conflict/semantic-resolution child WorkItems through DSH/HTTP, with a frozen current-project baseline, inherited objective/verification policy, bounded cumulative resolution requirements and fresh implementation/review identities. Final-acceptance failures require a completed safe keep-current decision before resolution.
+- Attempt-scoped read-only `teamwork_context` for base/proposal/current manifests and file pages; revoked readers and tampered inputs cannot supply new accepted evidence. Child, artifacts, outbox, parent link and command receipt commit atomically.
+- 138 tests locally, including real DSH conflict → context reads → independent review → explicit integration → final acceptance, plus context tampering/revocation, queued restart, pause/resume, requirement limits, atomic rollback and the real Cordis host resolve tool. Not part of v0.2.0-dev.1.
 
 ## 0.2.0-dev.1 — 2026-09-08
 

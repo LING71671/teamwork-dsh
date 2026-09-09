@@ -15,11 +15,11 @@ test('SDK result rejects idle without turn/end, error and max-tokens outcomes', 
   }
 });
 
-for (const verification of [false, true, 'repair', 'pause'] as const) test(`real DSH SDK + Cordis workers, offline provider, verification=${verification}`, { timeout: 90_000 }, async () => {
+for (const verification of [false, true, 'repair', 'pause', 'resolution'] as const) test(`real DSH SDK + Cordis workers, offline provider, verification=${verification}`, { timeout: 90_000 }, async () => {
   const fixtureHome = await mkdtemp(join(tmpdir(), 'teamwork-dsh-integration-'));
   const patch = join(fixtureHome, 'offline.patch.yml');
   const provider = new URL('./fixtures/offline-provider.js', import.meta.url).href;
-  await writeFile(patch, `- insert:\n    - id: offline-test-provider\n      name: ${JSON.stringify(provider)}\n      inject: [llm]\n      config:\n        repairDemo: ${verification === 'repair'}\n        pauseDemo: ${verification === 'pause'}\n`);
+  await writeFile(patch, `- insert:\n    - id: offline-test-provider\n      name: ${JSON.stringify(provider)}\n      inject: [llm]\n      config:\n        repairDemo: ${verification === 'repair'}\n        pauseDemo: ${verification === 'pause'}\n        resolutionDemo: ${verification === 'resolution'}\n`);
   const actualBin = fileURLToPath(new URL('../../node_modules/@deepseek-ai/dsh/lib/bin.js', import.meta.url));
   await verifyDsh(actualBin);
   let diagnostic = '';
@@ -44,9 +44,10 @@ for (const verification of [false, true, 'repair', 'pause'] as const) test(`real
     });
   const f = await setup(driver, 40_000, verification ? { maxIterations: verification === 'repair' ? 2 : 1, commands: [{
     id: 'readback', executable: process.execPath,
-    args: ['-e', "require('node:assert').equal(require('node:fs').readFileSync('hello.txt','utf8'),'changed through real DSH tool')"],
+    args: ['-e', verification === 'resolution' ? "require('node:assert').ok(require('node:fs').readFileSync('hello.txt','utf8').startsWith('changed through real DSH tool'))"
+      : "require('node:assert').equal(require('node:fs').readFileSync('hello.txt','utf8'),'changed through real DSH tool')"],
     timeoutMs: 5_000,
-  }] } : undefined, verification === true);
+  }] } : undefined, verification === true || verification === 'resolution');
   try {
     const run = await f.client.start({ commandId: 'real-dsh', objective: 'Exercise offline plugin integration' });
     if (verification === 'pause') {
@@ -105,6 +106,32 @@ for (const verification of [false, true, 'repair', 'pause'] as const) test(`real
       assert.equal(integrated.validation[0]!.status, 'passed');
       assert.ok(integrated.integrated?.artifactId);
       assert.equal(launched, 2); assert.equal(exited, 2); // Integration does not spawn a new model session.
+    }
+    if (verification === 'resolution') {
+      await writeFile(join(f.source, 'hello.txt'), 'user edit');
+      await writeFile(join(f.source, 'user-only'), 'keep this');
+      const view = await f.client.previewIntegration(run.id);
+      const conflict = await f.client.integrate(run.id, { commandId: 'conflicting-integration', type: 'integrate', planId: view.id, expectedRevision: f.store.get(run.id).revision });
+      assert.equal(conflict.phase, 'conflict');
+      const child = await f.client.resolveIntegration(run.id, conflict.id, { commandId: 'resolve-with-dsh', type: 'resolve', expectedRevision: conflict.revision,
+        planId: view.id, instructions: 'Combine the desired tool change with the user edit; preserve user-only files' });
+      const ready = await waitFor(() => {
+        const r = f.store.get(child.id); return ['verified', 'failed', 'rejected', 'blocked'].includes(r.phase) ? r : undefined;
+      }, 40_000);
+      assert.equal(ready.phase, 'verified', diagnostic || JSON.stringify(ready));
+      assert.equal(await readFile(join(ready.candidate!.workspace, 'hello.txt'), 'utf8'), 'changed through real DSH tool + user edit');
+      assert.equal(await readFile(join(f.source, 'hello.txt'), 'utf8'), 'user edit');
+      assert.equal(launched, 4); assert.equal(exited, 4);
+      const resolutionEvents = JSON.stringify(captures.slice(2).flatMap(c => c.events));
+      assert.match(resolutionEvents, /teamwork_context/);
+      assert.match(resolutionEvents, /user edit/);
+      assert.match(resolutionEvents, /outside the managed attempt allowlist/);
+      assert.equal(new Set(captures.map(c => c.sessionId)).size, 4);
+      const plan = await f.client.previewIntegration(child.id); assert.equal(plan.status, 'clear');
+      const integrated = await f.client.integrate(child.id, { commandId: 'integrate-dsh-resolution', type: 'integrate', planId: plan.id, expectedRevision: ready.revision });
+      await waitFor(() => f.store.integrations.get(integrated.id).phase === 'succeeded' ? true : undefined, 10_000);
+      assert.equal(await readFile(join(f.source, 'hello.txt'), 'utf8'), 'changed through real DSH tool + user edit');
+      assert.equal(await readFile(join(f.source, 'user-only'), 'utf8'), 'keep this');
     }
   } finally {
     await f.cleanup();
