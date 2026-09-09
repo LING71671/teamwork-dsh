@@ -41,9 +41,12 @@ export function apply(ctx: Context): void {
       if (command.type === 'abandon') return client.abandonIntegration(runId, integrationId, command, exec.signal);
       return client.cancelIntegration(runId, integrationId, command, exec.signal);
     }));
-  ctx.tools.register(tool('teamwork_control', 'Pause, resume or cancel user-authorized work. Supply current revision. Pause mode drain waits for the current execution; interrupt stops it. Pausing/stopping is not exit confirmation. Resume only when paused; it may start fresh model sessions and incur cost.',
-    object({ runId: string, commandId: string, expectedRevision: { type: 'integer' }, type: { type: 'string', enum: ['cancel', 'pause', 'resume'] },
-      mode: { type: 'string', enum: ['drain', 'interrupt'] } }, ['runId', 'commandId', 'expectedRevision', 'type']),
+  ctx.tools.register(tool('teamwork_control', 'Pause, resume, cancel or explicitly revise user-authorized work. Supply current RUN revision. Pause drain waits; interrupt stops; neither acceptance means exit proof. Resume only when paused. Revise requires a full replacement objective/spec and reason: pause/stop active work and descendants first; it invalidates old Gate and supersedes stopped descendants, snapshots the current project and starts new model work. This may incur cost. Never use revise merely to retry or silently widen authorization. It does not write back or change operator acceptance policy.',
+    object({ runId: string, commandId: string, expectedRevision: { type: 'integer' }, type: { type: 'string', enum: ['cancel', 'pause', 'resume', 'revise'] },
+      mode: { type: 'string', enum: ['drain', 'interrupt'] }, objective: string, reason: string,
+      spec: object({ requirements: { type: 'array', items: object({ id: string, text: string }) },
+        writeScope: object({ files: { type: 'array', items: string }, trees: { type: 'array', items: string } }) }),
+    }, ['runId', 'commandId', 'expectedRevision', 'type']),
     async (args, exec) => {
       const { runId, ...command } = z.object({ runId: identifier }).passthrough().parse(args);
       await client.hello(exec.signal);

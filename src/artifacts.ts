@@ -99,8 +99,8 @@ export async function artifactChanges(store: Store, runId: string, artifactId: s
   if (!run.baseline?.artifactId) throw new Fault('BASELINE_MISSING', 'No original baseline is registered for this run');
   const target = artifactId ?? run.candidate?.artifactId;
   if (!target) throw new Fault('CANDIDATE_MISSING', 'No candidate is registered yet');
-  const baseline = store.artifact(runId, run.baseline.artifactId), candidate = store.artifact(runId, target);
-  if (candidate.kind === 'baseline') throw new Fault('ARTIFACT_KIND', 'Select a candidate or checkpoint artifact');
+  const baseline = store.artifactBaseline(runId, target), candidate = store.artifact(runId, target);
+  if (!['candidate', 'checkpoint', 'integrated'].includes(candidate.kind)) throw new Fault('ARTIFACT_KIND', 'Select a candidate, checkpoint or integrated artifact, not reference inputs');
   const changes = compareManifests(await verified(baseline, signal), await verified(candidate, signal));
   return { baseline: descriptor(baseline), candidate: descriptor(candidate), changes: changes.slice(offset, offset + limit),
     total: changes.length, nextOffset: offset + limit < changes.length ? offset + limit : null };

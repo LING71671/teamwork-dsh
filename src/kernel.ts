@@ -12,7 +12,7 @@ const transitions: Record<Phase, readonly Phase[]> = {
   freezing: ['reviewing', 'verification_queued', 'stopping', 'failed', 'blocked'],
   reviewing: ['validating', 'stopping', 'failed', 'blocked'],
   validating: ['verified', 'rejected', 'repair_queued', 'stopping', 'failed', 'blocked'],
-  verified: [], rejected: [],
+  verified: [], rejected: [], superseded: [],
   stopping: ['cancelled', 'blocked'],
   submitted: [], failed: [], cancelled: [], blocked: [],
 };

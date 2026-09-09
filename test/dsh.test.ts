@@ -15,11 +15,11 @@ test('SDK result rejects idle without turn/end, error and max-tokens outcomes', 
   }
 });
 
-for (const verification of [false, true, 'repair', 'pause', 'resolution'] as const) test(`real DSH SDK + Cordis workers, offline provider, verification=${verification}`, { timeout: 90_000 }, async () => {
+for (const verification of [false, true, 'repair', 'pause', 'resolution', 'revision'] as const) test(`real DSH SDK + Cordis workers, offline provider, verification=${verification}`, { timeout: 90_000 }, async () => {
   const fixtureHome = await mkdtemp(join(tmpdir(), 'teamwork-dsh-integration-'));
   const patch = join(fixtureHome, 'offline.patch.yml');
   const provider = new URL('./fixtures/offline-provider.js', import.meta.url).href;
-  await writeFile(patch, `- insert:\n    - id: offline-test-provider\n      name: ${JSON.stringify(provider)}\n      inject: [llm]\n      config:\n        repairDemo: ${verification === 'repair'}\n        pauseDemo: ${verification === 'pause'}\n        resolutionDemo: ${verification === 'resolution'}\n        requirementDemo: ${verification === true}\n`);
+  await writeFile(patch, `- insert:\n    - id: offline-test-provider\n      name: ${JSON.stringify(provider)}\n      inject: [llm]\n      config:\n        repairDemo: ${verification === 'repair'}\n        pauseDemo: ${verification === 'pause'}\n        resolutionDemo: ${verification === 'resolution'}\n        requirementDemo: ${verification === true}\n        revisionDemo: ${verification === 'revision'}\n`);
   const actualBin = fileURLToPath(new URL('../../node_modules/@deepseek-ai/dsh/lib/bin.js', import.meta.url));
   await verifyDsh(actualBin);
   let diagnostic = '';
@@ -44,10 +44,10 @@ for (const verification of [false, true, 'repair', 'pause', 'resolution'] as con
     });
   const f = await setup(driver, 40_000, verification ? { maxIterations: verification === 'repair' ? 2 : 1, commands: [{
     id: 'readback', executable: process.execPath,
-    args: ['-e', verification === 'resolution' ? "require('node:assert').ok(require('node:fs').readFileSync('hello.txt','utf8').startsWith('changed through real DSH tool'))"
+    args: ['-e', verification === 'resolution' || verification === 'revision' ? "require('node:assert').ok(require('node:fs').readFileSync('hello.txt','utf8').startsWith('changed through real DSH tool'))"
       : "require('node:assert').equal(require('node:fs').readFileSync('hello.txt','utf8'),'changed through real DSH tool')"],
     timeoutMs: 5_000,
-  }] } : undefined, verification === true || verification === 'resolution');
+  }] } : undefined, verification === true || verification === 'resolution' || verification === 'revision');
   try {
     const run = await f.client.start({ commandId: 'real-dsh', objective: 'Exercise offline plugin integration', ...(verification === true ? {
       spec: { requirements: [{ id: 'readback', text: 'hello.txt must contain changed through real DSH tool' }], writeScope: { files: ['hello.txt'], trees: [] } },
@@ -110,6 +110,26 @@ for (const verification of [false, true, 'repair', 'pause', 'resolution'] as con
       assert.equal(integrated.validation[0]!.status, 'passed');
       assert.ok(integrated.integrated?.artifactId);
       assert.equal(launched, 2); assert.equal(exited, 2); // Integration does not spawn a new model session.
+    }
+    if (verification === 'revision') {
+      await writeFile(join(f.source, 'hello.txt'), 'user edit'); await writeFile(join(f.source, 'user-only'), 'keep this');
+      const revised = await f.client.control(run.id, { commandId: 'revise-real-dsh', type: 'revise', expectedRevision: settled.revision,
+        objective: 'Implement revised behavior and retain user-only files', reason: 'User changed requirements',
+        spec: { requirements: [{ id: 'revised', text: 'hello.txt ends with revised goal' }], writeScope: { files: ['hello.txt'], trees: [] } } });
+      assert.equal(revised.gate, 'not_evaluated'); assert.equal(revised.order.specRevision, 2);
+      const ready = await waitFor(() => { const r = f.store.get(run.id); return ['verified', 'failed', 'rejected', 'blocked'].includes(r.phase) ? r : undefined; }, 40_000);
+      assert.equal(ready.phase, 'verified', diagnostic || JSON.stringify(ready));
+      assert.equal(ready.reviewAttempt?.report?.review?.requirements?.[0]?.id, 'revised');
+      assert.equal(await readFile(join(ready.candidate!.workspace, 'hello.txt'), 'utf8'), 'changed through real DSH tool + revised goal');
+      assert.equal(await readFile(join(f.source, 'hello.txt'), 'utf8'), 'user edit');
+      assert.equal(launched, 4); assert.equal(exited, 4); assert.equal(new Set(captures.map(c => c.sessionId)).size, 4);
+      const events = JSON.stringify(captures.slice(2).flatMap(c => c.events));
+      assert.match(events, /teamwork_context/); assert.match(events, /user edit/); assert.match(events, /outside the managed attempt allowlist/);
+      const plan = await f.client.previewIntegration(run.id);
+      const integrated = await f.client.integrate(run.id, { commandId: 'integrate-revised', type: 'integrate', expectedRevision: ready.revision, planId: plan.id });
+      await waitFor(() => f.store.integrations.get(integrated.id).phase === 'succeeded' ? true : undefined, 10_000);
+      assert.equal(await readFile(join(f.source, 'hello.txt'), 'utf8'), 'changed through real DSH tool + revised goal');
+      assert.equal(await readFile(join(f.source, 'user-only'), 'utf8'), 'keep this');
     }
     if (verification === 'resolution') {
       await writeFile(join(f.source, 'hello.txt'), 'user edit');

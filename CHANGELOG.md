@@ -24,7 +24,11 @@
 - Candidate scope checks bind the original baseline, candidate and attempt input; unauthorized deltas cannot become submitted/verified candidates or completed pause snapshots. Integration independently rechecks the delta. This is output authorization, not an OS sandbox or prevention of transient writes.
 - Independent reviewers report exactly one verdict and specific observational evidence per requirement. Missing, duplicate and unknown IDs reject the Gate without automatic repair; actual requirement failures may use the configured bounded repair policy. Historical scope checks remain with failed-round/pause evidence.
 - Client transport failures now expose a sanitized underlying error code and explicitly flag unknown command outcomes, without automatically repeating writes. An accepted-write/lost-response test verifies explicit idempotent retry behavior.
-- 155 tests locally, including actual DSH structured requirement → review → explicit integration, conflict-resolution flows, scope violations, read-only output, parent replacement/mode/alias cases, missing/misattributed requirement evidence, rollback and recovery. Not part of v0.2.0-dev.1.
+- Explicit full-spec `revise` through DSH/HTTP: preserve Run identity and prior-version evidence, increment specRevision/epoch, snapshot current project as the new baseline, and require fresh implementation/review/acceptance. Identical specs do not reset work. Operator command policy is unchanged.
+- Revision requires stopped/undispatched work and no unresolved integration writer. Stopped descendants are atomically marked superseded; active/unknown descendants block revision. Old integration jobs cannot create resolution work from a new spec's Gate.
+- Scoped revision references expose only registered available prior base/proposal and frozen current content. Missing/damaged old references are explicitly unavailable; subsequent tampering blocks new validation. Historical artifact changes/previews use the original version's baseline.
+- Legacy artifact metadata resolves its baseline through archived attempt identities; untraceable evidence is rejected. Artifact registry failures abort revision without a receipt instead of being silently downgraded to missing references.
+- 168 tests locally, including actual DSH revision → reference tools → independent per-requirement review → explicit integration, plus transitive invalidation, stale credentials/Gate, narrowed scope, rollback, history-aware inspection and queued SQLite recovery. Not part of v0.2.0-dev.1.
 
 ## 0.2.0-dev.1 — 2026-09-08
 

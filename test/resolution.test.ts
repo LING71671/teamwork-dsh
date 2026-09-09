@@ -117,6 +117,8 @@ test('resolution context rejects arbitrary paths, host/other attempt credentials
     const child = await f.client.resolveIntegration(f.parent.id, f.conflict.id, await f.command());
     const resolver = await waitFor(() => f.fake.instances[2]);
     const client = clientOf(resolver);
+    await assert.rejects(f.client.changes(child.id, child.order.resolution!.inputs.proposal.artifactId!), { code: 'ARTIFACT_KIND' });
+    await assert.rejects(f.client.previewIntegration(child.id, child.order.resolution!.inputs.proposal.artifactId!), { code: 'ARTIFACT_KIND' });
     await assert.rejects(f.client.context(resolver.order.attemptId, { kind: 'conflicts', offset: 0, limit: 10 }), { code: 'UNAUTHORIZED' });
     await assert.rejects(clientOf(f.fake.instances[0]!).context(resolver.order.attemptId, { kind: 'conflicts', offset: 0, limit: 10 }), { code: 'UNAUTHORIZED' });
     await assert.rejects(client.artifact(child.id, child.baseline!.artifactId!), { code: 'UNAUTHORIZED' });

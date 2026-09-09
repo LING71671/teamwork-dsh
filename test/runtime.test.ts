@@ -88,7 +88,7 @@ test('HTTP rejects credentials, Origin, malformed schema and unsupported control
     response = await fetch(f.server.url + '/v1/runs', { method: 'POST', headers: { authorization: `Bearer ${f.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ commandId: 'bad', objective: 'fix', workspace: 'C:/' }) });
     assert.equal(response.status, 400);
     const run = await f.client.start({ commandId: 'start', objective: 'fix' });
-    response = await fetch(f.server.url + `/v1/runs/${run.id}/commands`, { method: 'POST', headers: { authorization: `Bearer ${f.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ type: 'revise' }) });
+    response = await fetch(f.server.url + `/v1/runs/${run.id}/commands`, { method: 'POST', headers: { authorization: `Bearer ${f.token}`, 'content-type': 'application/json' }, body: JSON.stringify({ type: 'unknown-control' }) });
     assert.equal(response.status, 422);
     const attempt = await waitFor(() => (f.executor as FakeExecutor).instances[0]);
     await assert.rejects(new Client(attempt.bridge.url, attempt.bridge.token).status(run.id), { code: 'UNAUTHORIZED' });

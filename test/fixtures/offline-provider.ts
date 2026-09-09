@@ -5,7 +5,7 @@ import { setTimeout } from 'node:timers/promises';
 
 export const name = 'teamwork-offline-test-provider';
 export const inject = ['llm'];
-export function apply(ctx: Context, config: { repairDemo?: boolean; pauseDemo?: boolean; resolutionDemo?: boolean; requirementDemo?: boolean } = {}): void {
+export function apply(ctx: Context, config: { repairDemo?: boolean; pauseDemo?: boolean; resolutionDemo?: boolean; requirementDemo?: boolean; revisionDemo?: boolean } = {}): void {
   class OfflineAdapter extends LlmAdapter {
     private calls = 0;
     async *stream(options: GenerateOptions): AsyncIterable<StreamChunk> {
@@ -13,13 +13,14 @@ export function apply(ctx: Context, config: { repairDemo?: boolean; pauseDemo?: 
       const index = this.calls++;
       const reviewing = process.env.TEAMWORK_ROLE === 'review';
       const resolving = config.resolutionDemo && process.env.TEAMWORK_CONTEXT === '1';
+      const revising = config.revisionDemo && process.env.TEAMWORK_CONTEXT === '1';
       const implementationContent = config.repairDemo && process.env.TEAMWORK_EPOCH === '1'
-        ? 'first round defect' : resolving ? 'changed through real DSH tool + user edit' : 'changed through real DSH tool';
+        ? 'first round defect' : revising ? 'changed through real DSH tool + revised goal' : resolving ? 'changed through real DSH tool + user edit' : 'changed through real DSH tool';
       if (config.pauseDemo && !reviewing && process.env.TEAMWORK_EPOCH === '1' && index === 3) {
         // Give the test host a deterministic checkpoint at which to interrupt the actual owned SDK process.
         await setTimeout(60_000, undefined, { ...(options.signal ? { signal: options.signal } : {}) });
       }
-      const prefix = resolving ? [
+      const prefix = resolving || revising ? [
         { kind: 'conflicts' },
         ...(['base', 'proposal', 'current'] as const).map(version => ({ kind: 'file', version, path: 'hello.txt' })),
       ] : [];
@@ -31,8 +32,8 @@ export function apply(ctx: Context, config: { repairDemo?: boolean; pauseDemo?: 
         : step === 1 ? { file_path: 'hello.txt', content: reviewing ? 'forbidden reviewer edit' : implementationContent }
         : { commandId: `fixture-${index}`, report: {
           outcome: 'completed', summary: 'Offline DSH plugin integration exercise', unresolved: [],
-          ...(reviewing ? { review: { functionality: 'pass', completeness: 'pass', findings: [], ...(config.requirementDemo ? {
-            requirements: [{ id: 'readback', verdict: 'pass', evidence: 'Read hello.txt through the actual read tool; content matches the requested text.' }],
+          ...(reviewing ? { review: { functionality: 'pass', completeness: 'pass', findings: [], ...(config.requirementDemo || revising ? {
+            requirements: [{ id: revising ? 'revised' : 'readback', verdict: 'pass', evidence: 'Read hello.txt through the actual read tool; content matches the requested text.' }],
           } : {}) } } : {}),
         } };
       const block = { type: 'tool-call' as const, id: ToolCallId(`fixture-call-${index}`), name: toolName, arguments: JSON.stringify(args) };

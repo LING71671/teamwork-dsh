@@ -10,8 +10,8 @@ export async function integrationPreview(store: Store, source: string, runId: st
   if (!run.baseline?.artifactId) throw new Fault('BASELINE_MISSING', 'No original baseline is registered for this run');
   const selected = artifactId ?? run.candidate?.artifactId;
   if (!selected) throw new Fault('CANDIDATE_MISSING', 'Select a registered candidate or checkpoint');
-  const baseline = store.artifact(runId, run.baseline.artifactId), candidate = store.artifact(runId, selected);
-  if (candidate.kind === 'baseline') throw new Fault('ARTIFACT_KIND', 'Select a candidate or checkpoint artifact');
+  const baseline = store.artifactBaseline(runId, selected), candidate = store.artifact(runId, selected);
+  if (!['candidate', 'checkpoint', 'integrated'].includes(candidate.kind)) throw new Fault('ARTIFACT_KIND', 'Select a candidate, checkpoint or integrated artifact, not reference inputs');
   const original = await treeManifest(baseline.workspace, signal), proposed = await treeManifest(candidate.workspace, signal);
   if (original.digest !== baseline.digest || proposed.digest !== candidate.digest) throw new Fault('ARTIFACT_CHANGED', 'Integration inputs no longer match their registered digests');
   const target = await sourceManifest(source, signal);

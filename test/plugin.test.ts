@@ -59,6 +59,17 @@ test('host registers with real Cordis tools; reload removes old tools and never 
     assert.notEqual(f.store.get(run.id).order.attemptId, run.order.attemptId);
     assert.deepEqual(f.store.get(run.id).order.spec, spec);
     assert.equal(f.store.all().length, 1);
+    const pauseAgain = await ctx.tools.execute({ callId: 'pause-before-revise' as ToolExecutionInput['callId'], name: 'teamwork_control',
+      arguments: { runId: run.id, commandId: 'pause-again', type: 'pause', mode: 'interrupt', expectedRevision: f.store.get(run.id).revision }, signal: new AbortController().signal });
+    assert.equal(pauseAgain.isError, false, JSON.stringify(pauseAgain));
+    await waitFor(() => f.store.get(run.id).phase === 'paused' ? true : undefined);
+    const revised = await ctx.tools.execute({ callId: 'revise-call' as ToolExecutionInput['callId'], name: 'teamwork_control',
+      arguments: { runId: run.id, commandId: 'revise', type: 'revise', expectedRevision: f.store.get(run.id).revision,
+        objective: 'New user goal', spec, reason: 'User replaced the objective' }, signal: new AbortController().signal });
+    assert.equal(revised.isError, false, JSON.stringify(revised));
+    assert.equal(f.store.get(run.id).order.specRevision, 2); assert.equal(f.store.get(run.id).order.epoch, 3);
+    assert.equal(f.store.get(run.id).specHistory?.[0]?.previous.order.objective, 'fix');
+    assert.equal(f.store.all().length, 1);
     await fiber.dispose();
   } finally {
     await ctx.fiber.dispose();

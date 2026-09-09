@@ -3,7 +3,7 @@ import { join, dirname } from 'node:path';
 import { Store, digest } from './store.js';
 import { Fault, type Executor, type StartCommand, type CancelCommand, type Run,
   type VerificationPolicy, type WorkOrder, type ValidationResult, type ControlCommand, type Candidate,
-  type IntegrationPolicy, type IntegrateCommand, type IntegrationStatus, type AbandonIntegrationCommand, type ResolveIntegrationCommand } from './contracts.js';
+  type IntegrationPolicy, type IntegrateCommand, type IntegrationStatus, type AbandonIntegrationCommand, type ResolveIntegrationCommand, type ReviseCommand } from './contracts.js';
 import { activityPhase } from './kernel.js';
 import { snapshot, treeDigest, treeManifest, inputsUnchanged } from './workspace.js';
 import { compareManifests } from './artifacts.js';
@@ -14,6 +14,7 @@ import { integrationPreview } from './integration-preview.js';
 import { IntegrationEngine } from './integration-engine.js';
 import { integrationRequest, integrationStatus } from './integration-journal.js';
 import { resolveIntegration } from './resolution.js';
+import { reviseRun } from './revision.js';
 
 export interface RuntimeOptions {
   source: string;
@@ -65,7 +66,7 @@ export class Runtime {
     if (this.store.get(id).phase === 'stopping') this.active.get(id)?.abort.abort();
     return run;
   }
-  control(id: string, input: ControlCommand): Run {
+  control(id: string, input: Exclude<ControlCommand, ReviseCommand>): Run {
     if (this.store.get(id).integration && input.type === 'cancel') {
       const integration = this.store.get(id).integration!;
       if (['prepared', 'applying', 'snapshotting', 'validating'].includes(integration.phase)) {
@@ -83,6 +84,18 @@ export class Runtime {
     const current = this.store.get(id);
     if (current.phase === 'pausing' && current.pause?.mode === 'interrupt') this.active.get(id)?.abort.abort();
     return run;
+  }
+  async revise(id: string, input: ReviseCommand, signal: AbortSignal): Promise<Run> {
+    if (this.closing) throw new Fault('UNAVAILABLE', 'Runtime is shutting down or an owned process is unconfirmed', 503);
+    const old = this.store.replayRevision(id, input); if (old) return old;
+    if (this.activeIntegration) throw new Fault('INTEGRATION_BUSY', 'Wait for the integration writer to stop');
+    const task = reviseRun(this.store, this.options.source, this.options.attemptsDirectory, id, input,
+      AbortSignal.any([signal, this.shutdown.signal])).then(run => { queueMicrotask(() => this.pump()); return run; }).catch(error => {
+      const committed = this.store.replayRevision(id, input); if (committed) return committed;
+      throw error;
+    });
+    this.preparation.add(task);
+    try { return await task; } finally { this.preparation.delete(task); }
   }
   async integrate(id: string, input: IntegrateCommand, signal: AbortSignal): Promise<IntegrationStatus> {
     if (!this.integrationEnabled) throw new Fault('CAPABILITY_MISSING', 'Integration is disabled by the operator', 422);
@@ -150,10 +163,11 @@ export class Runtime {
     this.preparation.add(task);
     try { return await task; } finally { this.preparation.delete(task); }
   }
-  private async checkResolution(run: Run, signal: AbortSignal): Promise<void> {
-    if (!run.order.resolution) return;
-    for (const input of Object.values(run.order.resolution.inputs)) {
-      if (await treeDigest(input.workspace, signal) !== input.digest) throw new Fault('RESOLUTION_CONTEXT_CHANGED', 'Registered resolution evidence changed');
+  private async checkContext(run: Run, signal: AbortSignal): Promise<void> {
+    const context = run.order.resolution ?? run.order.revisionContext;
+    if (!context) return;
+    for (const input of Object.values(context.inputs)) {
+      if (await treeDigest(input.workspace, signal) !== input.digest) throw new Fault(run.order.resolution ? 'RESOLUTION_CONTEXT_CHANGED' : 'REVISION_CONTEXT_CHANGED', 'Registered reference evidence changed');
     }
   }
   private async checkScope(run: Run, candidate: Candidate, signal: AbortSignal): Promise<void> {
@@ -202,7 +216,7 @@ export class Runtime {
     let implementationCompleted = false;
     try {
       if (run.phase === 'verification_starting') { await this.verify(run, abort); return; }
-      const base = run.order.resume?.candidate ?? run.order.repair?.candidate ?? run.order.resolution?.inputs.current;
+      const base = run.order.resume?.candidate ?? run.order.repair?.candidate ?? run.order.resolution?.inputs.current ?? run.order.revisionContext?.inputs.current;
       if (base) {
         if (await treeDigest(base.workspace, abort.signal) !== base.digest) {
           throw new Fault('CANDIDATE_CHANGED', 'Replacement base changed');
@@ -220,7 +234,7 @@ export class Runtime {
         run = this.store.recordBaseline(run.id, baseline);
       }
       const inputTreeDigest = await treeDigest(run.order.workspace, abort.signal);
-      await this.checkResolution(run, abort.signal);
+      await this.checkContext(run, abort.signal);
       abort.signal.throwIfAborted();
       run = this.store.bindInput(run.id, inputTreeDigest);
       this.store.move(run.id, 'running');
@@ -298,7 +312,7 @@ export class Runtime {
   }
   private async verify(run: Run, abort: AbortController): Promise<void> {
     const signal = abort.signal;
-    await this.checkResolution(run, signal);
+    await this.checkContext(run, signal);
     const candidate = run.candidate;
     if (!candidate || await treeDigest(candidate.workspace, signal) !== candidate.digest) {
       throw new Fault('CANDIDATE_CHANGED', 'Queued verification candidate changed');
@@ -341,7 +355,7 @@ export class Runtime {
     signal.throwIfAborted();
     if (this.store.get(run.id).phase === 'pausing' && (!intact || !acceptanceIntegrity)) throw new Fault('CANDIDATE_CHANGED', 'Paused verification inputs changed');
     if (await this.pauseStopped(run.id, abort)) return;
-    await this.checkResolution(run, signal);
+    await this.checkContext(run, signal);
     if (intact) await this.checkScope(run, candidate, signal);
     this.store.finishGate(run.id, results, intact, acceptanceIntegrity);
   }

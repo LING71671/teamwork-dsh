@@ -4,7 +4,7 @@ import { join, dirname } from 'node:path';
 import { Fault, terminal, type Run, type Event, type StartCommand, type CancelCommand,
   type BridgeCommand, type Phase, type VerificationPolicy, type Candidate, type WorkOrder, type ValidationResult,
   type PauseCommand, type ResumeCommand, type PauseContinuation, type RoundEvidence, type ArtifactDescriptor, type ResolveIntegrationCommand,
-  type ResolutionContext, type ScopeCheck, startSchema } from './contracts.js';
+  type ResolutionContext, type RevisionContext, type ReviseCommand, type ScopeCheck, startSchema, reviseSchema } from './contracts.js';
 import { activityPhase, evaluateGate, receive, transition, repairEligible, repairFeedback } from './kernel.js';
 import { IntegrationJournal, integrationStatus } from './integration-journal.js';
 
@@ -93,7 +93,8 @@ export class Store {
   private registerArtifact(run: Run, candidate: Candidate, kind: ArtifactDescriptor['kind']): Candidate {
     const id = digest(canonical({ runId: run.id, workspace: candidate.workspace, digest: candidate.digest }));
     const record: ArtifactDescriptor & { workspace: string } = { id, runId: run.id, kind, digest: candidate.digest,
-      attemptId: run.order.attemptId, workspace: candidate.workspace, createdAt: run.updatedAt };
+      attemptId: run.order.attemptId, workspace: candidate.workspace, createdAt: run.updatedAt, specRevision: run.order.specRevision,
+      ...(run.baseline?.artifactId ? { baselineId: run.baseline.artifactId } : {}) };
     this.db.prepare('INSERT OR IGNORE INTO artifacts VALUES(?,?,?)').run(id, run.id, JSON.stringify(record));
     return { ...candidate, artifactId: id };
   }
@@ -109,6 +110,17 @@ export class Store {
     const row = this.db.prepare('SELECT data FROM artifacts WHERE id=? AND run_id=?').get(artifactId, id);
     if (!row) throw new Fault('NOT_FOUND', 'Artifact is not registered for this run', 404);
     return JSON.parse(row.data as string) as ArtifactDescriptor & { workspace: string };
+  }
+  artifactBaseline(id: string, artifactId: string): ArtifactDescriptor & { workspace: string } {
+    const artifact = this.artifact(id, artifactId), run = this.get(id);
+    if (artifact.baselineId) return this.artifact(id, artifact.baselineId);
+    const versions = [run, ...(run.specHistory ?? []).map(history => history.previous)];
+    const version = artifact.specRevision !== undefined ? versions.find(value => value.order.specRevision === artifact.specRevision)
+      : versions.find(value => [value.order, ...(value.history ?? []).map(round => round.order), ...(value.suspensions ?? []).map(round => round.order)]
+        .some(order => order.attemptId === artifact.attemptId)) ?? (!run.specHistory?.length ? run : undefined);
+    if (!version) throw new Fault('BASELINE_VERSION_UNKNOWN', 'Historical artifact cannot be matched to a specification baseline');
+    if (!version.baseline?.artifactId) throw new Fault('BASELINE_MISSING', 'No baseline is registered for this artifact version');
+    return this.artifact(id, version.baseline.artifactId);
   }
   recordBaseline(id: string, candidate: Candidate): Run {
     return this.transaction(() => {
@@ -163,6 +175,8 @@ export class Store {
     executionProfile: unknown, context: ResolutionContext): Run {
     return this.integrations.resolve(parentId, integrationId, input, () => {
       const parent = this.get(parentId);
+      const job = this.integrations.get(integrationId);
+      if (job.gateInputDigest !== parent.order.inputDigest || job.candidate.artifactId !== parent.candidate?.artifactId) throw new Fault('INTEGRATION_GATE_STALE', 'Integration no longer belongs to the current candidate');
       if (parent.phase !== 'verified' || parent.gate !== 'passed' || !parent.verification ||
         parent.candidate?.digest !== context.inputs.proposal.digest || parent.baseline?.digest !== context.inputs.base.digest) {
         throw new Fault('INTEGRATION_GATE_STALE', 'Parent candidate or baseline changed');
@@ -170,7 +184,7 @@ export class Store {
       if (context.parentRunId !== parentId || context.integrationId !== integrationId || context.planId !== input.planId) throw new Fault('RESOLUTION_IDENTITY', 'Resolution inputs do not match the command');
       const id = randomUUID(), attemptId = randomUUID(), at = new Date().toISOString();
       let run: Run = { id, revision: 0, phase: 'queued', gate: 'not_evaluated', iteration: 1, history: [], createdAt: at, updatedAt: at,
-        verification: parent.verification,
+        verification: parent.verification, parentRunId: parent.id,
         order: { runId: id, workItemId: randomUUID(), attemptId, dispatchKey: randomUUID(), epoch: 1, specRevision: parent.order.specRevision + 1,
           objective: parent.order.objective, ...(parent.order.spec ? { spec: parent.order.spec } : {}),
           workspace: join(workspace, attemptId, 'work'), inputDigest: '', resolution: context } };
@@ -185,15 +199,75 @@ export class Store {
       return run;
     });
   }
-  contextScope(attemptId: string, token: string): { runId: string; context: ResolutionContext } {
+  contextScope(attemptId: string, token: string): { runId: string; context: ResolutionContext | RevisionContext } {
     const credential = this.db.prepare('SELECT run_id,hash FROM credentials WHERE attempt_id=?').get(attemptId);
     if (!credential || credential.hash !== digest(token)) throw new Fault('UNAUTHORIZED', 'Invalid attempt credential', 401);
     const run = this.get(credential.run_id as string), review = run.reviewAttempt?.order.attemptId === attemptId;
     const order = review ? run.reviewAttempt!.order : run.order;
     if (order.attemptId !== attemptId || activityPhase(run) !== (review ? 'reviewing' : 'running') ||
       (run.phase === 'pausing' && run.pause?.mode !== 'drain') || (review ? run.reviewAttempt!.report : run.report)) throw new Fault('RESULT_STALE', 'Attempt is no longer allowed to inspect resolution inputs');
-    if (!order.resolution) throw new Fault('CONTEXT_MISSING', 'This attempt has no registered resolution context', 403);
-    return { runId: run.id, context: order.resolution };
+    const context = order.resolution ?? order.revisionContext;
+    if (!context) throw new Fault('CONTEXT_MISSING', 'This attempt has no registered reference context', 403);
+    return { runId: run.id, context };
+  }
+  replayRevision(id: string, input: ReviseCommand): Run | undefined {
+    const row = this.db.prepare('SELECT digest,response FROM commands WHERE id=?').get(`host:${input.commandId}`);
+    if (!row) return undefined;
+    if (row.digest !== digest(canonical({ id, input }))) throw new Fault('IDEMPOTENCY_CONFLICT', 'Command ID reused with a different payload');
+    return JSON.parse(row.response as string) as Run;
+  }
+  revisionImpact(id: string, input: ReviseCommand): Run[] {
+    const run = this.get(id);
+    if (run.revision !== input.expectedRevision) throw new Fault('REVISION_CONFLICT', 'Run changed before revision');
+    const stopped = ['queued', 'repair_queued', 'verification_queued', 'paused', 'submitted', 'verified', 'rejected', 'failed', 'cancelled'];
+    if (!stopped.includes(run.phase)) throw new Fault('REVISION_NOT_READY', 'Pause/stop the current attempt and prove exit before revising');
+    if (run.order.objective === input.objective && canonical(run.order.spec ?? { requirements: [], writeScope: { files: [], trees: ['.'] } }) === canonical(input.spec)) {
+      throw new Fault('SPEC_UNCHANGED', 'A revision must change the objective or structured specification, not merely restart the same work');
+    }
+    if (this.integrations.unresolved() || this.integrations.pending().length) throw new Fault('INTEGRATION_RECONCILIATION_REQUIRED', 'Finish or resolve the source integration before revising');
+    const all = this.all(), ids = new Set([id]), descendants: Run[] = [];
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const child of all) if (!ids.has(child.id) && ids.has(child.parentRunId ?? child.order.resolution?.parentRunId ?? '')) {
+        ids.add(child.id); descendants.push(child); changed = true;
+      }
+    }
+    if (descendants.some(child => !stopped.includes(child.phase) && child.phase !== 'superseded')) {
+      throw new Fault('REVISION_ACTIVE_DESCENDANTS', 'Pause/stop all derived attempts first; unknown processes cannot be superseded');
+    }
+    return descendants;
+  }
+  revise(id: string, input: ReviseCommand, context: RevisionContext, workspace: string): Run {
+    input = reviseSchema.parse(input);
+    return this.command(`host:${input.commandId}`, { id, input }, () => {
+      const descendants = this.revisionImpact(id, input), old = this.get(id);
+      if (context.previousSpecRevision !== old.order.specRevision || context.reason !== input.reason) throw new Fault('REVISION_CONTEXT_STALE', 'Revision references do not match the previous specification');
+      const attemptId = randomUUID(), at = new Date().toISOString(), specRevision = old.order.specRevision + 1;
+      const { specHistory: _history, ...previous } = old;
+      const parentRunId = old.parentRunId ?? old.order.resolution?.parentRunId;
+      let run: Run = { id, revision: old.revision + 1, phase: 'queued', gate: 'not_evaluated', iteration: 1, history: [],
+        createdAt: old.createdAt, updatedAt: at,
+        ...(old.verification ? { verification: old.verification } : {}), ...(parentRunId ? { parentRunId } : {}),
+        specHistory: [...(old.specHistory ?? []), { reason: input.reason, at, previous }],
+        order: { runId: id, workItemId: old.order.workItemId, attemptId, dispatchKey: randomUUID(), epoch: old.order.epoch + 1,
+          specRevision, objective: input.objective, spec: input.spec, workspace: join(workspace, attemptId, 'work'), inputDigest: '' } };
+      const current = this.registerArtifact(run, context.inputs.current, 'baseline');
+      const revisionContext: RevisionContext = { ...context, inputs: { current,
+        ...(context.inputs.base ? { base: this.registerArtifact(run, context.inputs.base, 'context') } : {}),
+        ...(context.inputs.proposal ? { proposal: this.registerArtifact(run, context.inputs.proposal, 'context') } : {}) } };
+      run = { ...run, baseline: current, order: { ...run.order, revisionContext,
+        inputDigest: digest(canonical({ previousInput: old.order.inputDigest, objective: input.objective, spec: input.spec, specRevision,
+          epoch: run.order.epoch, revisionContext, verification: old.verification })) } };
+      for (const child of descendants) {
+        if (child.phase === 'superseded') continue;
+        this.save({ ...child, phase: 'superseded', gate: 'not_evaluated', revision: child.revision + 1, updatedAt: at,
+          supersededBy: { runId: id, specRevision }, reason: 'PARENT_SPEC_REVISED' }, 'run.superseded');
+        this.db.prepare("UPDATE outbox SET state='done' WHERE run_id=?").run(child.id);
+      }
+      this.save(run, 'run.spec_revised');
+      this.db.prepare("UPDATE outbox SET state='pending' WHERE run_id=?").run(id);
+      return run;
+    });
   }
   pending(): string[] {
     return this.db.prepare("SELECT run_id FROM outbox JOIN runs ON runs.id=outbox.run_id WHERE state='pending' ORDER BY json_extract(runs.data,'$.updatedAt'),run_id")

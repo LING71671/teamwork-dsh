@@ -29,7 +29,9 @@ export const cancelSchema = z.object({
 }).strict();
 export const pauseSchema = cancelSchema.extend({ type: z.literal('pause'), mode: z.enum(['drain', 'interrupt']).default('drain') });
 export const resumeSchema = cancelSchema.extend({ type: z.literal('resume') });
-export const controlSchema = z.discriminatedUnion('type', [cancelSchema, pauseSchema, resumeSchema]);
+export const reviseSchema = cancelSchema.extend({ type: z.literal('revise'), objective: z.string().trim().min(1).max(32_000),
+  spec: runSpecSchema, reason: z.string().trim().min(1).max(2000) });
+export const controlSchema = z.discriminatedUnion('type', [cancelSchema, pauseSchema, resumeSchema, reviseSchema]);
 export const integrationPolicySchema = z.object({ enabled: z.boolean() }).strict();
 export const integrateSchema = cancelSchema.extend({ type: z.literal('integrate'), planId: z.string().regex(/^[a-f0-9]{64}$/) });
 export const abandonIntegrationSchema = cancelSchema.extend({ type: z.literal('abandon'), targetDigest: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().trim().min(1).max(2000) });
@@ -65,6 +67,8 @@ export type VerificationPolicy = z.infer<typeof verificationSchema>;
 export interface Candidate { workspace: string; digest: string; artifactId?: string }
 export interface ArtifactDescriptor {
   id: string; runId: string; kind: 'baseline' | 'candidate' | 'checkpoint' | 'integrated' | 'context'; digest: string; attemptId: string; createdAt: string;
+  specRevision?: number;
+  baselineId?: string;
 }
 export type TreeEntry = { path: string; kind: 'directory' } |
   { path: string; kind: 'file'; size: number; executable: number; digest: string };
@@ -121,13 +125,21 @@ export const contextQuerySchema = z.discriminatedUnion('kind', [
   filePageSchema.extend({ kind: z.literal('file'), version: contextVersionSchema }),
 ]);
 export type ContextQuery = z.infer<typeof contextQuerySchema>;
-export type ContextResult = ArtifactPage | ArtifactFile | { conflicts: IntegrationChange[]; total: number; nextOffset: number | null };
+export type ContextResult = ArtifactPage | ArtifactFile | { conflicts: IntegrationChange[]; total: number; nextOffset: number | null; available?: boolean };
 export interface ResolutionContext {
   parentRunId: string; integrationId: string; planId: string;
   requirements: string[];
   feedback: string;
   inputs: Record<ContextVersion, Candidate>;
   conflicts: IntegrationChange[];
+}
+export interface RevisionContext {
+  previousSpecRevision: number;
+  reason: string;
+  inputs: { current: Candidate; base?: Candidate; proposal?: Candidate };
+  conflicts: IntegrationChange[];
+  conflictPreviewAvailable: boolean;
+  unavailable: ContextVersion[];
 }
 export interface ValidationResult {
   commandId: string;
@@ -147,12 +159,13 @@ export type StartCommand = z.infer<typeof startSchema>;
 export type CancelCommand = z.infer<typeof cancelSchema>;
 export type PauseCommand = z.infer<typeof pauseSchema>;
 export type ResumeCommand = z.infer<typeof resumeSchema>;
+export type ReviseCommand = z.infer<typeof reviseSchema>;
 export type ControlCommand = z.infer<typeof controlSchema>;
 export type Report = z.infer<typeof reportSchema>;
 export type BridgeCommand = z.infer<typeof bridgeSchema>;
 export type Phase = 'queued' | 'repair_queued' | 'verification_queued' | 'verification_starting' |
   'pausing' | 'paused' | 'starting' | 'running' | 'stopping' |
-  'submitted' | 'failed' | 'cancelled' | 'blocked' | 'freezing' | 'reviewing' | 'validating' | 'verified' | 'rejected';
+  'submitted' | 'failed' | 'cancelled' | 'blocked' | 'freezing' | 'reviewing' | 'validating' | 'verified' | 'rejected' | 'superseded';
 
 export interface WorkOrder {
   runId: string;
@@ -171,6 +184,7 @@ export interface WorkOrder {
   repair?: { candidate: Candidate; feedback: string };
   resume?: { previousAttemptId: string; candidate?: Candidate; checkpoint?: Report };
   resolution?: ResolutionContext;
+  revisionContext?: RevisionContext;
 }
 export type PauseContinuation = { kind: 'queued'; phase: 'queued' | 'repair_queued' | 'verification_queued' } |
   { kind: 'implementation'; candidate?: Candidate } | { kind: 'verification'; candidate: Candidate } |
@@ -211,6 +225,9 @@ export interface Run {
   pause?: { mode: 'drain' | 'interrupt'; stage: Phase; continuation?: PauseContinuation };
   suspensions?: RoundEvidence[];
   integration?: IntegrationStatus;
+  parentRunId?: string;
+  supersededBy?: { runId: string; specRevision: number };
+  specHistory?: { reason: string; at: string; previous: Omit<Run, 'specHistory'> }[];
 }
 export interface Event {
   cursor: number;
@@ -225,7 +242,7 @@ export class Fault extends Error {
   }
 }
 export const terminal = (phase: Phase): boolean =>
-  ['submitted', 'failed', 'cancelled', 'blocked', 'verified', 'rejected'].includes(phase);
+  ['submitted', 'failed', 'cancelled', 'blocked', 'verified', 'rejected', 'superseded'].includes(phase);
 
 // Portable execution seam: importing this module never loads a harness SDK.
 export interface Execution {

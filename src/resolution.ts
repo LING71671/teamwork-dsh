@@ -18,6 +18,7 @@ export async function resolveIntegration(store: Store, source: string, attempts:
   if (job.revision !== input.expectedRevision) throw new Fault('REVISION_CONFLICT', 'Integration revision changed');
   if (!job.authorized || !['conflict', 'abandoned'].includes(job.phase) || job.commandIntent) throw new Fault('RESOLUTION_NOT_READY', 'Resolve conflicts only after the previous integration is stopped and ownership released');
   if (parent.phase !== 'verified' || parent.gate !== 'passed' || !parent.baseline || !parent.candidate || !parent.verification) throw new Fault('INTEGRATION_NOT_VERIFIED', 'Resolution needs the original verified candidate');
+  if (job.gateInputDigest !== parent.order.inputDigest || job.candidate.artifactId !== parent.candidate.artifactId) throw new Fault('INTEGRATION_GATE_STALE', 'This integration belongs to an older specification/candidate');
   if (store.integrations.unresolved()) throw new Fault('INTEGRATION_RECONCILIATION_REQUIRED', 'Resolve retained integration ownership first');
   const requirements = [...(parent.order.resolution?.requirements ?? []), input.instructions];
   if (requirements.join('\n').length > 32_000) throw new Fault('RESOLUTION_BUDGET', 'Inherited resolution requirements exceed the 32,000-character budget');

@@ -66,11 +66,14 @@ export async function serve(runtime: Runtime, token: string, port = 0): Promise<
       const query = Object.fromEntries(url.searchParams);
       if (Object.keys(query).length !== [...url.searchParams].length) throw new Fault('SCHEMA_INVALID', 'Duplicate query parameters', 400);
       const input = contextQuerySchema.parse(query);
+      const reference = input.kind === 'conflicts' ? undefined : scope.context.inputs[input.version];
+      if (input.kind !== 'conflicts' && !reference) throw new Fault('CONTEXT_VERSION_MISSING', 'This reference version is unavailable for the current attempt', 404);
       const result = input.kind === 'conflicts' ? { conflicts: scope.context.conflicts.slice(input.offset, input.offset + input.limit), total: scope.context.conflicts.length,
+        available: 'conflictPreviewAvailable' in scope.context ? scope.context.conflictPreviewAvailable : true,
         nextOffset: input.offset + input.limit < scope.context.conflicts.length ? input.offset + input.limit : null }
         : await inspect<ContextResult>(res, signal => input.kind === 'manifest'
-          ? artifactManifest(runtime.store, scope.runId, scope.context.inputs[input.version].artifactId!, input.offset, input.limit, signal)
-          : artifactFile(runtime.store, scope.runId, scope.context.inputs[input.version].artifactId!, input.path, input.offset, input.length, signal));
+          ? artifactManifest(runtime.store, scope.runId, reference!.artifactId!, input.offset, input.limit, signal)
+          : artifactFile(runtime.store, scope.runId, reference!.artifactId!, input.path, input.offset, input.length, signal));
       runtime.store.contextScope(attemptId, auth); // Cancellation/epoch replacement can revoke an in-flight read.
       json(res, 200, result); return;
     }
@@ -82,7 +85,7 @@ export async function serve(runtime: Runtime, token: string, port = 0): Promise<
     }
     if (!equal(auth, token)) throw new Fault('UNAUTHORIZED', 'Invalid host credential', 401);
     if (req.method === 'GET' && url.pathname === '/v1/hello') {
-      json(res, 200, { protocolVersion, features: ['start', 'status', 'cancel', 'pause', 'resume', 'checkpoint', 'submit', 'events', 'review-gate', 'structured-requirements', 'write-scope', 'bounded-repair', 'candidate-recovery', 'artifacts', 'changes', 'integration-preview', 'integration-status',
+      json(res, 200, { protocolVersion, features: ['start', 'status', 'cancel', 'pause', 'resume', 'revise', 'revision-context', 'checkpoint', 'submit', 'events', 'review-gate', 'structured-requirements', 'write-scope', 'bounded-repair', 'candidate-recovery', 'artifacts', 'changes', 'integration-preview', 'integration-status',
         ...(runtime.integrationEnabled ? ['integrate', 'integration-cancel', 'integration-keep-current', 'integration-resolve', 'resolution-context'] : [])],
         verificationEnabled: runtime.verificationEnabled,
         integrationEnabled: runtime.integrationEnabled,
@@ -151,10 +154,11 @@ export async function serve(runtime: Runtime, token: string, port = 0): Promise<
     const id = match[1]!;
     if (req.method === 'POST' && match[2] === 'commands') {
       const input = await body(req);
-      if (typeof input === 'object' && input !== null && 'type' in input && !['cancel', 'pause', 'resume'].includes(String(input.type))) {
+      if (typeof input === 'object' && input !== null && 'type' in input && !['cancel', 'pause', 'resume', 'revise'].includes(String(input.type))) {
         throw new Fault('CAPABILITY_MISSING', 'Unknown control command', 422);
       }
-      json(res, 202, runtime.control(id, controlSchema.parse(input))); return;
+      const command = controlSchema.parse(input);
+      json(res, 202, command.type === 'revise' ? await inspect(res, signal => runtime.revise(id, command, signal)) : runtime.control(id, command)); return;
     }
     if (req.method !== 'GET') throw new Fault('NOT_FOUND', 'Unknown route', 404);
     if (!match[2]) { json(res, 200, runtime.store.get(id)); return; }

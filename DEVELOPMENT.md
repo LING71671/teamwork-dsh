@@ -16,7 +16,7 @@ npm ci --registry=https://registry.npmjs.org
 npm test
 ```
 
-目前有 155 项自动化测试。真实 DSH 测试覆盖单实现者、完整评审/Gate、结构化需求逐项评审、四进程失败修复链，以及“checkpoint → 中断并确认退出 → 新实现者 → 新评审 → 验收”三进程恢复链；离线 LLM adapter 调用真实工具，不发送网络模型请求、不需要 API key。显式集成测试进一步将真实 DSH 的候选写回临时项目，保留期间新增的用户文件并重新验收；冲突链覆盖读取三方内容、产生新候选、独立评审、再次显式集成。其他测试覆盖去重、身份/版本拒绝、候选和上下文篡改、读取凭证撤销、失败/超时/输入改写、暂停竞态、重载、产物权限与分页、三方冲突、SQLite 恢复、真实子进程退出边界、取消、保留当前文件、需求继承上限、新工作项事务回滚、越界变更与漏评/重复需求 ID。这不等同于真实模型效果验收。
+目前有 168 项自动化测试。真实 DSH 测试覆盖单实现者、完整评审/Gate、结构化需求逐项评审、四进程需求修订与失败修复链，以及“checkpoint → 中断并确认退出 → 新实现者 → 新评审 → 验收”三进程恢复链；离线 LLM adapter 调用真实工具，不发送网络模型请求、不需要 API key。显式集成测试进一步将真实 DSH 的候选写回临时项目，保留期间新增的用户文件并重新验收；冲突链覆盖读取三方内容、产生新候选、独立评审、再次显式集成。其他测试覆盖去重、身份/版本拒绝、候选和上下文篡改、读取凭证撤销、失败/超时/输入改写、暂停竞态、重载、产物权限与分页、三方冲突、SQLite 恢复、真实子进程退出边界、取消、保留当前文件、需求修订与后代失效、历史基线、新工作项事务回滚、越界变更与漏评/重复需求 ID。这不等同于真实模型效果验收。
 
 测试只使用临时 DSH_HOME，不修改用户 DSH profile。测试生成的临时副本和状态在结束后清理。
 
@@ -59,7 +59,7 @@ Runtime 输出 loopback 地址和 `connection.json` 路径，不输出令牌。�
 
 ## 有限次数修复（协议 0.3）
 
-在 Runtime 配置的 `verification` 中显式设置 `"maxIterations": 2` 可启用修复；范围为 1–5，包含第一轮，不设置等同于 1。该配置仅由操作者决定，host/worker 工具不能增大预算。示例见 `examples/runtime.repair.example.json`。每轮会启动实现者和全新评审者，可能增加模型费用。
+在 Runtime 配置的 `verification` 中显式设置 `"maxIterations": 2` 可启用修复；范围为 1–5，包含第一轮，不设置等同于 1。该限制适用于每个需求版本；用户显式修订需求后开始新版本的轮次，跨版本总预算仍待实现。该配置仅由操作者决定，host/worker 工具不能修改上限。示例见 `examples/runtime.repair.example.json`。每轮会启动实现者和全新评审者，可能增加模型费用。
 
 当实现报告不完整、评审否决或验收命令失败/超时时，且完整性与证据检查通过、仍有预算，Gate 将失败轮与新的 outbox 意图在同一事务中持久化，进入 `repair_queued`。随后为相同 WorkItem 创建全新 Attempt、dispatchKey、凭证和工作目录，epoch 增加，原始 objective/specRevision 不变。新工作副本来自上一轮候选，不来自原项目，也不携带验收生成物。
 
@@ -84,7 +84,7 @@ dsh --profile web --patch C:\work\teamwork-dsh\examples\host.cordis.patch.yml
 |---|---|
 | `teamwork_start` | `commandId`、`objective`，可选 `spec: {requirements, writeScope}` |
 | `teamwork_status` | `runId` |
-| `teamwork_control` | `runId`、`commandId`、`expectedRevision`、`type: "cancel" / "pause" / "resume"`；仅 pause 可带 `mode` |
+| `teamwork_control` | `runId`、`commandId`、`expectedRevision`、`type: "cancel" / "pause" / "resume" / "revise"`；pause 可带 `mode`；revise 必须有完整 `objective`、`spec`、`reason` |
 | `teamwork_inspect` | `runId`、`kind: "artifacts" / "manifest" / "file" / "changes" / "integration" / "integrations"`，其他字段见下节 |
 | `teamwork_integrate` | `runId`、`commandId`、`expectedRevision`、`type: "integrate" / "cancel" / "abandon" / "resolve"`，计划/集成 ID 与决策字段见集成章节 |
 
@@ -114,7 +114,7 @@ writeScope 的 files 是精确文件路径，trees 是目录及其所有后代�
 
 未传 spec 的新 Run 保存 `requirements: []` 和整个普通项目范围，保持旧 start 调用方式；需要缩小范围时必须明确提供 spec，host 不应擅自扩大用户给定范围。既有数据库中没有 spec 的旧记录按旧语义读取，不伪造历史范围检查。不要用旧 Runtime 读取新语义的数据目录。
 
-spec 保存在 `order.spec`，参与初始 inputDigest，随修复、暂停恢复和冲突解决工作项继承。正常动作没有修改 spec 的权限；resolve.instructions 也不能扩大文件范围。变更授权或需求版本修订的命令仍待实现。目前验收程序、轮数和 Attempt 超时仍由操作者的 Runtime 配置管理，而不是完整统一的 RunSpec 预算。
+spec 保存在 `order.spec`，参与初始 inputDigest，随修复、暂停恢复和冲突解决工作项继承。只有用户授权的显式 revise 可完整替换 objective/spec；resolve.instructions、普通修复和恢复不能扩大文件范围。目前验收程序、轮数和 Attempt 超时仍由操作者的 Runtime 配置管理，而不是完整统一的 RunSpec 预算。
 
 Runtime 在确认实现者停止、固定副本后，对比原基线与候选，包括增删、内容、执行位、文件/目录类型变化；暂停快照和验证入口同样检查。在 `scopeCheck` 中记录 inputDigest、baselineDigest、candidateDigest 与 violations，只有与本 Attempt 输入和候选匹配的检查才能参与新 Gate。越界以 `SCOPE_VIOLATION` 失败，不自动重试、不标记 submitted/verified/paused；副本中的失败改动保留，源项目不会因此被写回。集成 prepare 还会独立检查同一候选范围，无关用户改动不作为候选越界。范围检查不能证明功能完成，仍必须通过其他 Gate 条件。
 
@@ -128,13 +128,13 @@ Runtime 在确认实现者停止、固定副本后，对比原基线与候选，
 
 开启验证时，链路为 `running → freezing → verification_queued → verification_starting → reviewing → validating → verified/rejected`。先关闭实现者，再复制 Candidate 并校验 SHA-256 树摘要；将固定 Candidate 和验证 outbox 原子持久化，之后才派发评审。评审和验收均从此 Candidate 获得独立副本。评审必须提交 `report.review.functionality`、`completeness`（pass/fail）和 `findings`。只有实现报告无未解决项、评审两项通过且无 findings、所有命令 exit 0，以及候选/评审输入完整性满足时，Gate 才为 passed。`verified` 只代表此候选在该策略下通过，不代表已经集成，也不是功能绝对正确的证明。
 
-`running/starting → stopping → cancelled` 只有在确认退出后完成。退出未知进入 `blocked`，不得假报取消成功。`idle` 没有 submit、执行失败或超时进入 `failed`。
+`running/starting → stopping → cancelled` 只有在确认退出后完成。退出未知进入 `blocked`，不得假报取消成功。`idle` 没有 submit、执行失败或超时进入 `failed`。父任务需求修订后，已停止的派生工作进入 `superseded`，Gate 不再有效；这不是取消确认、修复完成或集成成功。
 
 结果代码留在状态返回的 `order.workspace` 中；开启验证时以 `candidate.workspace` / `candidate.digest` 标识被验收的候选。快照是逻辑上的内容冻结，不是 OS 不可写文件；Gate 前会重新校验，后续使用仍需检查摘要。不会自动复制回原项目。
 
 ## HTTP 接口（开发协议 0.3）
 
-host 与 Runtime 应一起更新；hello 会报告 `verificationEnabled`、`maxIterations` 和 `bounded-repair` / `pause` / `resume` / `candidate-recovery` 能力。协议 0.1/0.2 的旧 host 会在握手时拒绝不匹配版本，避免默默开启新的工作流程。不要用旧 Runtime 打开含新状态的数据目录。
+host 与 Runtime 应一起更新；hello 会报告 `verificationEnabled`、`maxIterations` 和 `bounded-repair` / `pause` / `resume` / `revise` / `revision-context` / `candidate-recovery` 能力。协议 0.1/0.2 的旧 host 会在握手时拒绝不匹配版本，避免默默开启新的工作流程。不要用旧 Runtime 打开含新状态的数据目录。
 
 所有请求使用 `Authorization: Bearer <scoped-token>`。写请求为 JSON，256 KiB 上限。仅监听 `127.0.0.1`，拒绝浏览器 Origin 与不匹配 Host，不开启 CORS。
 
@@ -145,7 +145,7 @@ host 与 Runtime 应一起更新；hello 会报告 `verificationEnabled`、`maxI
 | `GET /v1/hello` | host；协议与实际能力 |
 | `POST /v1/runs` | host；异步创建 |
 | `GET /v1/runs/{runId}` | host；最新状态 |
-| `POST /v1/runs/{runId}/commands` | host；cancel / pause / resume |
+| `POST /v1/runs/{runId}/commands` | host；cancel / pause / resume / revise |
 | `GET /v1/runs/{runId}/events?after={cursor}` | host；SSE 补读，事件 ID 是持久游标 |
 | `GET /v1/runs/{runId}/artifacts` | host；分页列出已登记的基线、候选与暂停快照 |
 | `GET /v1/runs/{runId}/artifacts/{artifactId}` | host；核对树摘要并分页列出文件/目录 |
@@ -156,7 +156,7 @@ host 与 Runtime 应一起更新；hello 会报告 `verificationEnabled`、`maxI
 | `GET /v1/runs/{runId}/integrations` | host；分页查询本 Run 的集成历史 |
 | `GET /v1/runs/{runId}/integrations/{integrationId}` | host；最新集成状态、最终验收、恢复目录与产物引用 |
 | `POST /v1/runs/{runId}/integrations/{integrationId}/commands` | host；cancel、abandon/保留当前文件或 resolve/返回新 Run |
-| `GET /v1/attempts/{attemptId}/context` | 活动解决者/评审者独有凭证；只读三方上下文，kind 与 version 见下文 |
+| `GET /v1/attempts/{attemptId}/context` | 活动解决者、修订工作者及其评审者独有凭证；只读登记上下文，kind 与 version 见下文 |
 | `POST /v1/attempts/{attemptId}/checkpoint` | 该 Attempt 独有凭证 |
 | `POST /v1/attempts/{attemptId}/submit` | 该 Attempt 独有凭证 |
 
@@ -164,9 +164,9 @@ worker 从进程环境绑定 epoch、inputDigest 和根 session ID，不允许�
 
 ## 产物与变更检查
 
-第一次实现前会保存独立原始基线 `baseline`，其中包括初始副本中已存在的未提交修改。后续暂停、修复与恢复不替换这个基线。Candidate 与暂停快照在固定后获得 `artifactId`；注册记录和相关状态在同一 SQLite 事务中保存。模型报告中的路径不是产物授权依据。
+每个需求版本都有独立基线 `baseline`，其中包括捕获时普通项目中的未提交修改。相同版本内的暂停、修复与恢复不替换基线；显式 revise 创建新基线，旧版本保存在 specHistory，旧基线和产物不删除。Candidate 与暂停快照在固定后获得 `artifactId`；注册记录和相关状态在同一 SQLite 事务中保存。新产物记录 specRevision 和可用的 baselineId；模型报告中的路径不是产物授权依据。
 
-`teamwork_inspect` 的 `kind: "artifacts"` 列出登记项；`manifest` 需要 artifactId；`file` 需要 artifactId 和标准化的相对路径；`changes` 默认比较原始基线与当前候选，也可指定某个历史候选或暂停快照的 artifactId。清单描述 added/deleted/modified/type_changed，含文件摘要、大小和执行位；不表示变更已集成或验收成功。
+`teamwork_inspect` 的 `kind: "artifacts"` 列出登记项；`manifest` 需要 artifactId；`file` 需要 artifactId 和标准化的相对路径；`changes` 默认比较当前版本基线与当前候选，也可指定历史候选、暂停快照或集成快照。历史产物使用所属版本基线，不能套用新版本基线；无法从旧登记与保存的版本/Attempt 记录确认归属时明确拒绝，不猜测。基线和 context 引用本身不能被选作候选。清单描述 added/deleted/modified/type_changed，含文件摘要、大小和执行位；不表示变更已集成或验收成功。
 
 清单分页使用 `offset` 和 `limit`（默认 100、最大 500），返回 nextOffset；继续读变更清单时固定返回的 candidate.id，避免改读到新一轮候选。文件分页使用字节 offset 和 length（默认 16 KiB、最大 64 KiB），完整文件摘要校验通过后才返回该页；正常 UTF-8 页返回文本，二进制或切在 UTF-8 字符中间的页返回 base64。nextOffset 为 null 表示结束。
 
@@ -176,7 +176,7 @@ worker 从进程环境绑定 epoch、inputDigest 和根 session ID，不允许�
 
 ### 集成冲突预览（只读接口）
 
-`teamwork_inspect` 使用 `kind: "integration"`，默认选当前 Candidate，也可用 artifactId 指定已登记的历史候选或暂停快照。Runtime 只读取其配置的原项目，不接受模型传入目标目录。清单对比最初基线、所选快照、当前项目；保留与候选变更无关的用户修改，不自动做同文件文本合并。
+`teamwork_inspect` 使用 `kind: "integration"`，默认选当前 Candidate，也可用 artifactId 指定已登记的历史候选或暂停/集成快照。Runtime 只读取其配置的原项目，不接受模型传入目标目录。清单对比所选快照所属版本的基线、所选快照、当前项目；保留与候选变更无关的用户修改，不自动做同文件文本合并。旧版本候选始终 candidateVerified=false，不能被用于新版本的显式集成。
 
 每项 disposition 是 `apply`（可计划应用）、`already_applied`（目标已是相同内容）或 `conflict`。冲突原因包括 `concurrent_change`、`ancestor_changed`、`descendant_changed`、`protected_path`、`path_alias`。整个计划的 status 为 clear/conflicts；即使当前分页没显示冲突，conflictCount 也计算完整清单。删除/替换目录时，用户新增或修改的子项会阻止操作；目录内 `.git`、`node_modules`、`.teamwork`、`.env`、`.env.*`、`.npmrc` 等排除项也会阻止操作，且不会读取其内容。过滤名称不区分大小写。大小写或 Unicode 规范化别名保守报冲突。
 
@@ -245,6 +245,35 @@ failed/blocked 集成必须先满足退出证据要求，并由用户显式完�
 新候选通过 Gate 后，必须针对**新 Run**重新预览并显式发起 integrate，最终合并树再验收通过才算该次集成成功。期间用户再次修改相同文件会产生新的冲突，需要新的明确决策。这不是自动文本合并、自动覆盖或备份还原功能。
 
 ## 恢复与边界
+
+### 显式需求修订
+
+用户改变目标或授权范围时，用 `teamwork_control` 的 `type: "revise"` 提交完整新 objective/spec 和 reason。它不是部分字段 patch，不继承省略的新需求，也不是普通修复或增加重试额度的入口。示例中的 revision 必须换成最新 Run revision：
+
+```json
+{
+  "runId": "<Run ID>",
+  "commandId": "revise-001",
+  "type": "revise",
+  "expectedRevision": 12,
+  "objective": "增加新的空输入处理，并保持现有数值求和行为。",
+  "spec": {
+    "requirements": [{ "id": "empty", "text": "空输入返回 0。" }],
+    "writeScope": { "files": ["sum.mjs"], "trees": [] }
+  },
+  "reason": "用户替换了目标并缩小允许修改的文件范围。"
+}
+```
+
+HTTP 使用 POST Run commands，省略 body 的 runId。必须处于未派发、完全 paused 或已停止的 submitted/verified/rejected/failed/cancelled 状态；运行、停止中或 blocked 不接受修订。先显式 pause/stop 并确认退出。存在尚未停止或退出未知的后代时返回 REVISION_ACTIVE_DESCENDANTS；存在集成 writer、pending 或保留源租约时也拒绝。integration.phase=succeeded 之后若还有短暂 reservation 清理，可能返回 INTEGRATION_BUSY，等待实际结束再以相同命令内容重试。revision 不匹配先刷新状态；相同 objective/spec 返回 SPEC_UNCHANGED，不通过只修改 reason 来重跑。
+
+修订保留 Run 和 WorkItem ID，新建 Attempt、dispatchKey、凭证和目录，specRevision 与 epoch 递增，Gate 重置为 not_evaluated；新版本的 iteration 从 1 开始。当前 report/candidate/review/validation/scopeCheck/integration 投影不沿用。旧版本的完整状态及轮次、暂停证据和产物引用保存在 specHistory；历史集成仍可通过 integrations 查询。新基线来自修订时冻结的当前项目，不是旧候选，也不写回项目。已集成的旧成果因此属于新基线，能够正确表达新需求下的后续修改或移除。
+
+目前按整个派生分支失效，不假装有细粒度依赖分析。通过 parentRunId 保留派生关系；已停止/排队的后代在同一事务内变为 superseded，gate 不再有效、outbox 不再派发，supersededBy 标明触发的 Run 与新版本。运行或未知后代不会被文字修订强行清除。旧 Gate 和旧 integration 不允许为新版本创建解决工作项或执行写回。新版本、旧证据归档、新基线登记、后代失效、事件、outbox 和幂等回执一起提交或一起回滚。
+
+修订实现者和全新评审者通过 teamwork_context 读取当前版本的登记参考：current 为新基线，base 为可用的旧基线，proposal 为可用的旧候选或暂停快照。没有或已经损坏的旧版本列在 revisionContext.unavailable，相应读取返回 CONTEXT_VERSION_MISSING，不会伪造内容；conflicts 返回 available=false 时不能推断无冲突。数据库和程序错误不降级为参考缺失，修订失败且不提交回执。旧参考只提供实现线索，不继承旧目标或扩大新范围。绑定后再发生参考篡改会阻止新 Gate。完全替换任务不要求把旧候选所有改动重新带入新版本。
+
+新版本需要全新提交、逐项评审与命令验收，通过后仍须针对新候选重新预览并显式集成。排队修订跨 SQLite 重启仍使用已冻结的 current，不重新抓取后来的源修改。修订会消耗新的模型工作，可能产生费用；跨版本总 Token/时间/费用预算、计划修订和更细的影响分析仍待实现。
 
 ### 暂停与手动恢复
 
