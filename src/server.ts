@@ -3,7 +3,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { ZodError } from 'zod';
 import { Runtime } from './runtime.js';
 import { Fault, protocolVersion, startSchema, controlSchema, bridgeSchema, pageSchema, filePageSchema, changePageSchema, integrationPageSchema,
-  integrateSchema, cancelSchema, abandonIntegrationSchema, resolveIntegrationSchema, contextQuerySchema, type ContextResult } from './contracts.js';
+  integrateSchema, cancelSchema, abandonIntegrationSchema, resolveIntegrationSchema, contextQuerySchema, workflowControlSchema, type ContextResult } from './contracts.js';
 import { artifactManifest, artifactFile, artifactChanges } from './artifacts.js';
 
 async function body(req: IncomingMessage): Promise<unknown> {
@@ -86,13 +86,13 @@ export async function serve(runtime: Runtime, token: string, port = 0): Promise<
     if (!equal(auth, token)) throw new Fault('UNAUTHORIZED', 'Invalid host credential', 401);
     if (req.method === 'GET' && url.pathname === '/v1/hello') {
       json(res, 200, { protocolVersion, features: ['start', 'status', 'cancel', 'pause', 'resume', 'revise', 'revision-context', 'checkpoint', 'submit', 'events', 'review-gate', 'structured-requirements', 'write-scope', 'bounded-repair', 'candidate-recovery', 'artifacts', 'changes', 'integration-preview', 'integration-status',
-        'model-attempt-budget', 'budget-increase',
+        'model-attempt-budget', 'budget-increase', 'workflow-status', 'workflow-control',
         ...(runtime.integrationEnabled ? ['integrate', 'integration-cancel', 'integration-keep-current', 'integration-resolve', 'resolution-context', 'automatic-integration', 'automatic-conflict-resolution'] : [])],
         modelAttemptBudget: { enforcement: 'durable-pre-dispatch-reservation', sharedAcrossDescendants: true, tokenAccounting: false, monetaryAccounting: false },
         verificationEnabled: runtime.verificationEnabled,
         integrationEnabled: runtime.integrationEnabled,
         maxIterations: runtime.maxIterations,
-        limitations: ['no-auto-integration', 'no-stdio-reattach', 'cooperative-isolation'] });
+        limitations: ['no-ungranted-integration', 'no-stdio-reattach', 'cooperative-isolation'] });
       return;
     }
     if (req.method === 'POST' && url.pathname === '/v1/runs') {
@@ -125,6 +125,13 @@ export async function serve(runtime: Runtime, token: string, port = 0): Promise<
         json(res, 200, runtime.integrations(runId, input.offset, input.limit)); return;
       }
       throw new Fault('NOT_FOUND', 'Unknown integration route', 404);
+    }
+    const workflow = /^\/v1\/runs\/([a-zA-Z0-9_-]+)\/workflow(\/commands)?$/.exec(url.pathname);
+    if (workflow) {
+      if (url.search) throw new Fault('SCHEMA_INVALID', 'Workflow routes do not accept query parameters', 400);
+      if (req.method === 'GET' && !workflow[2]) { json(res, 200, runtime.store.workflow(workflow[1]!)); return; }
+      if (req.method === 'POST' && workflow[2]) { json(res, 202, runtime.controlWorkflow(workflow[1]!, workflowControlSchema.parse(await body(req)))); return; }
+      throw new Fault('NOT_FOUND', 'Unknown workflow route', 404);
     }
     const preview = /^\/v1\/runs\/([a-zA-Z0-9_-]+)\/integration-preview$/.exec(url.pathname);
     if (preview && req.method === 'GET') {

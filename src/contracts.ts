@@ -49,6 +49,21 @@ export const budgetCommandSchema = cancelSchema.extend({ type: z.literal('budget
   maxModelAttempts: modelBudgetSchema.shape.maxModelAttempts, reason: z.string().trim().min(1).max(2000) });
 export type BudgetCommand = z.infer<typeof budgetCommandSchema>;
 export const controlSchema = z.discriminatedUnion('type', [cancelSchema, pauseSchema, resumeSchema, reviseSchema, budgetCommandSchema]);
+const workflowCommandBase = z.object({ commandId: identifier, expectedWorkflowRevision: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
+export const workflowControlSchema = z.discriminatedUnion('type', [
+  workflowCommandBase.extend({ type: z.literal('pause'), mode: z.enum(['drain', 'interrupt']).default('drain') }),
+  workflowCommandBase.extend({ type: z.literal('resume') }), workflowCommandBase.extend({ type: z.literal('cancel') }),
+]);
+export type WorkflowControlCommand = z.infer<typeof workflowControlSchema>;
+export interface WorkflowHold { rootRunId: string; revision: number; mode: 'running' | 'paused' | 'cancelled' }
+export interface WorkflowStatus {
+  rootRunId: string; revision: string;
+  state: 'running' | 'pausing' | 'paused' | 'cancelling' | 'cancelled' | 'blocked' | 'needs_attention' | 'verified' | 'integrated' | 'submitted';
+  runs: Pick<Run, 'id' | 'revision' | 'phase' | 'gate' | 'parentRunId' | 'reason' | 'automaticIntegration'>[];
+  integrations: (IntegrationStatus & { runId: string })[];
+  budgets: ModelBudgetStatus[]; holds: WorkflowHold[];
+  activeRunIds: string[]; leafRunIds: string[];
+}
 export const integrationPolicySchema = z.object({ enabled: z.boolean() }).strict();
 export const integrateSchema = cancelSchema.extend({ type: z.literal('integrate'), planId: z.string().regex(/^[a-f0-9]{64}$/) });
 export const abandonIntegrationSchema = cancelSchema.extend({ type: z.literal('abandon'), targetDigest: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().trim().min(1).max(2000) });

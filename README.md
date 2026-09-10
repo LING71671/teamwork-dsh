@@ -19,6 +19,7 @@ A portable teamwork orchestration runtime, with DeepSeek Harness (DSH) as its fi
 - 未授权自动集成时不改写原项目。`verified` 表示候选通过当前验收策略，不表示已集成。
 - 0.3 可显式启用 `teamwork_integrate`：先预览并授权，再串行写回、保留备份并验收最终合并树；支持取消与有条件的“保留当前文件”处理。
 - 创建时提供 `autonomy: {"integration":"on-gate-pass"}` 与明确 spec，即可一次授权后自动完成 Gate → 预检 → 串行写回 → 最终验收，不需要第二次集成批准。再提供 `conflicts:"resolve"` 和共享总预算，可自动创建冲突修复子任务并重新评审、验收和写回。
+- `teamwork_status` / `teamwork_control` 的 `scope: "workflow"` 在根任务上汇总和控制整条派生链。使用聚合版本一次暂停、恢复或取消所有相关任务及集成派发；无需逐个操作子任务。这是可选人工控制，不是自主执行中的审批步骤。
 - 冲突可通过 `teamwork_integrate` 的 `resolve` 创建新工作项：以当前项目为基线，只读查看三方输入，重新实现、独立评审并验收；有已接受的自动写回策略时通过后自动集成，否则仍用显式集成命令。
 
 0.3 工作树还支持操作者配置的 1–5 轮有限修复和逐轮证据保留；默认只执行一轮。暂停提供 drain / interrupt；恢复使用新会话而非重新连接旧进程。集成默认关闭，必须配置 `integration.enabled: true` 并通过创建时策略或显式命令授权，示例见 `examples/runtime.integration.example.json`。尚未实现：完整 RunSpec、未知进程强证据对账、批量产物导出、slash commands、OpenCode/Pi 适配。完整开发方向见 [ROADMAP](ROADMAP.md)。后续适配顺序为 DSH → OpenCode → Pi。

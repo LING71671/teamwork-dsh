@@ -1,7 +1,7 @@
 import type { Context } from '@deepseek-ai/cordis';
 import '@deepseek-ai/dsh-tools';
 import { z } from 'zod';
-import { startSchema, controlSchema, identifier, pageSchema, filePageSchema, changePageSchema, integrationPageSchema, integrateSchema, cancelSchema, abandonIntegrationSchema, resolveIntegrationSchema } from '../contracts.js';
+import { startSchema, controlSchema, workflowControlSchema, identifier, pageSchema, filePageSchema, changePageSchema, integrationPageSchema, integrateSchema, cancelSchema, abandonIntegrationSchema, resolveIntegrationSchema } from '../contracts.js';
 import { clientFromEnvironment, object, string, tool } from './shared.js';
 
 export const name = 'teamwork-host';
@@ -21,9 +21,9 @@ export function apply(ctx: Context): void {
       return client.start(startSchema.parse(args), exec.signal);
     }));
   ctx.tools.register(tool('teamwork_status', 'Read authoritative run status and independent review/command evidence. verified means the candidate passed configured acceptance, NOT integrated. Only integration.phase succeeded means its final merged snapshot passed final acceptance. gate not_evaluated means no acceptance yet. automaticIntegration.resolutionRunId points to the active/finished conflict-resolution child; follow that Run (and further descendants) for progress and control, because the parent retains its historical conflict state.',
-    object({ runId: string }), async (args, exec) => {
-      const { runId } = z.object({ runId: identifier }).strict().parse(args);
-      return client.status(runId, exec.signal);
+    object({ runId: string, scope: { type: 'string', enum: ['run', 'workflow'], description: 'Use workflow for the whole autonomous resolution chain: aggregate revision, active members, effective leaves, integration outcomes and shared budgets. Omission reads one Run.' } }, ['runId']), async (args, exec) => {
+      const { runId, scope } = z.object({ runId: identifier, scope: z.enum(['run', 'workflow']).default('run') }).strict().parse(args);
+      return scope === 'workflow' ? client.workflow(runId, exec.signal) : client.status(runId, exec.signal);
     }));
   const integrationControl = z.discriminatedUnion('type', [
     integrateSchema.extend({ runId: identifier }),
@@ -44,15 +44,18 @@ export function apply(ctx: Context): void {
     }));
   ctx.tools.register(tool('teamwork_control', 'Pause, resume, cancel, explicitly revise work or increase a shared model-attempt budget. Supply current RUN revision. Budget requires an explicit user allocation, the budget root runId, expectedBudgetRevision, new total maxModelAttempts and reason; never auto-approve extra cost. Allocation does not resume work; follow with a separately authorized resume. Pause drain waits; interrupt stops; neither acceptance means exit proof. Resume only when paused with remaining budget. Revise requires a full replacement objective/spec and reason: pause/stop active work and descendants first; it invalidates old Gate and supersedes stopped descendants, snapshots the current project and starts new model work. It retains consumed budget. This may incur cost. Never use revise merely to retry or silently widen authorization. Revise drops the old automatic writeback grant unless autonomy {integration:"on-gate-pass"} is explicitly authorized again for the replacement scope. Pause/resume/cancel also control pending automatic integration after Gate; Run remains verified while automaticIntegration.state reflects that pause. Once an integration job exists use its own cancel command. Operator acceptance policy is unchanged.',
     object({ runId: string, commandId: string, expectedRevision: { type: 'integer' }, type: { type: 'string', enum: ['cancel', 'pause', 'resume', 'revise', 'budget'] },
+      scope: { type: 'string', enum: ['run', 'workflow'], description: 'Use workflow to pause/resume/cancel this Run and all descendants atomically, including integration dispatch. Requires expectedWorkflowRevision from workflow status, NOT expectedRevision. Drain allows a claimed writer to finish; interrupt/cancel may leave partial files requiring reconciliation. A cancelled workflow cannot resume. These are user controls, not approvals required at each autonomous step.' },
+      expectedWorkflowRevision: string,
       expectedBudgetRevision: { type: 'integer' }, maxModelAttempts: { type: 'integer' },
       mode: { type: 'string', enum: ['drain', 'interrupt'] }, objective: string, reason: string,
       autonomy: object({ integration: { type: 'string', enum: ['on-gate-pass'] }, conflicts: { type: 'string', enum: ['resolve'] } }, ['integration']),
       spec: object({ requirements: { type: 'array', items: object({ id: string, text: string }) },
         writeScope: object({ files: { type: 'array', items: string }, trees: { type: 'array', items: string } }) }),
-    }, ['runId', 'commandId', 'expectedRevision', 'type']),
+    }, ['runId', 'commandId', 'type']),
     async (args, exec) => {
-      const { runId, ...command } = z.object({ runId: identifier }).passthrough().parse(args);
+      const { runId, scope, ...command } = z.object({ runId: identifier, scope: z.enum(['run', 'workflow']).default('run') }).passthrough().parse(args);
       await client.hello(exec.signal);
+      if (scope === 'workflow') return client.controlWorkflow(runId, workflowControlSchema.parse(command), exec.signal);
       return client.control(runId, controlSchema.parse(command), exec.signal);
     }));
   const inspectSchema = z.discriminatedUnion('kind', [

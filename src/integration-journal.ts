@@ -110,7 +110,15 @@ export class IntegrationJournal {
       const record = this.get(id);
       if (record.runId !== runId) throw new Fault('NOT_FOUND', 'Integration is not in this run', 404);
       const old = this.replay(request); if (old) return old;
-      if (record.revision !== command.expectedRevision) throw new Fault('REVISION_CONFLICT', 'Integration revision changed');
+      const next = this.cancelWithinTransaction(runId, id, command.expectedRevision);
+      this.receipt(request, next); return next;
+    });
+  }
+  /** Internal composition seam: caller owns the same SQLite transaction (no filesystem effects). */
+  cancelWithinTransaction(runId: string, id: string, expectedRevision: number): IntegrationRecord {
+      const record = this.get(id);
+      if (record.runId !== runId) throw new Fault('NOT_FOUND', 'Integration is not in this run', 404);
+      if (record.revision !== expectedRevision) throw new Fault('REVISION_CONFLICT', 'Integration revision changed');
       if (record.phase === 'abandoning') throw new Fault('INTEGRATION_STATE', 'An accepted keep-current resolution cannot be cancelled');
       let next = record;
       if (['prepared', 'applying', 'snapshotting', 'validating'].includes(record.phase)) {
@@ -119,8 +127,7 @@ export class IntegrationJournal {
         if (undispatched) this.db.prepare('DELETE FROM integration_leases WHERE source=? AND job_id=?').run(record.source, id);
         next = this.save(next, undispatched ? 'integration.cancelled' : 'integration.cancel_requested');
       }
-      this.receipt(request, next); return next;
-    });
+      return next;
   }
   abandon(runId: string, id: string, command: AbandonIntegrationCommand): IntegrationRecord {
     const request = integrationRequest(runId, command, id);

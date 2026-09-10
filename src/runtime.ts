@@ -3,7 +3,8 @@ import { join, dirname } from 'node:path';
 import { Store, digest } from './store.js';
 import { Fault, type Executor, type StartCommand, type CancelCommand, type Run,
   type VerificationPolicy, type WorkOrder, type ValidationResult, type ControlCommand, type Candidate,
-  type IntegrationPolicy, type IntegrateCommand, type IntegrationStatus, type AbandonIntegrationCommand, type ResolveIntegrationCommand, type ReviseCommand } from './contracts.js';
+  type IntegrationPolicy, type IntegrateCommand, type IntegrationStatus, type AbandonIntegrationCommand, type ResolveIntegrationCommand, type ReviseCommand,
+  type WorkflowControlCommand, type WorkflowStatus } from './contracts.js';
 import { activityPhase } from './kernel.js';
 import { snapshot, treeDigest, treeManifest, inputsUnchanged } from './workspace.js';
 import { compareManifests } from './artifacts.js';
@@ -91,6 +92,18 @@ export class Runtime {
     const current = this.store.get(id);
     if (current.phase === 'pausing' && current.pause?.mode === 'interrupt') this.active.get(id)?.abort.abort();
     return run;
+  }
+  controlWorkflow(id: string, input: WorkflowControlCommand): WorkflowStatus {
+    const old = this.store.replayWorkflowControl(id, input); if (old) return old;
+    if (input.type === 'resume' && this.closing) throw new Fault('UNAVAILABLE', 'Runtime is shutting down or an owned process is unconfirmed', 503);
+    const receipt = this.store.controlWorkflow(id, input);
+    for (const member of receipt.runs) {
+      const run = this.store.get(member.id);
+      if (run.phase === 'stopping' || (run.phase === 'pausing' && run.pause?.mode === 'interrupt')) this.active.get(run.id)?.abort.abort();
+    }
+    if (this.activeIntegration && this.store.integrations.get(this.activeIntegration.id).cancelRequested) this.activeIntegration.abort.abort();
+    queueMicrotask(() => this.pump());
+    return receipt;
   }
   async revise(id: string, input: ReviseCommand, signal: AbortSignal): Promise<Run> {
     if (this.closing) throw new Fault('UNAVAILABLE', 'Runtime is shutting down or an owned process is unconfirmed', 503);
@@ -194,7 +207,7 @@ export class Runtime {
     if (this.automaticPreparation) return;
     if (this.activeIntegration) return;
     if (this.integrationEnabled) {
-      const pending = this.store.integrations.pending()[0];
+      const pending = this.store.integrations.pending().find(job => job.phase === 'abandoning' || job.dispatch === 'claimed' || !this.store.workflowHeld(job.runId));
       if (pending) {
         // Drain existing Attempts before touching the source; do not start new source snapshots
         // or starve a pending integration with fresh worker dispatches.
@@ -240,7 +253,7 @@ export class Runtime {
     const signal = this.shutdown.signal;
     for (let retry = 0; retry < 3; retry++) {
       const intent = this.store.automatic(id);
-      if (signal.aborted || intent.state !== 'pending') return;
+      if (signal.aborted || intent.state !== 'pending' || this.store.workflowHeld(intent.runId)) return;
       const run = this.store.get(intent.runId);
       if (run.phase !== 'verified' || run.gate !== 'passed' || run.autonomy?.integration !== 'on-gate-pass' ||
           run.order.inputDigest !== intent.inputDigest || run.candidate?.artifactId !== intent.candidateId || run.automaticIntegration?.id !== id) {
@@ -276,7 +289,7 @@ export class Runtime {
           }
         }
       } catch (error) {
-        if (signal.aborted || this.store.automatic(id).state !== 'pending') return;
+        if (signal.aborted || this.store.automatic(id).state !== 'pending' || this.store.workflowHeld(intent.runId)) return;
         if (retry < 2 && error instanceof Fault && ['REVISION_CONFLICT', 'INTEGRATION_PLAN_STALE', 'CONFLICTS_CLEARED'].includes(error.code)) continue;
         this.store.finishAutomatic(id, { reason: error instanceof Fault ? error.code : 'AUTOMATIC_PREPARATION_FAILED' }); return;
       }

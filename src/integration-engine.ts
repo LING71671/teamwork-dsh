@@ -87,6 +87,7 @@ export class IntegrationEngine {
     if (request) { const old = this.store.integrations.replay(request); if (old) return old; }
     signal.throwIfAborted();
     if (this.store.get(runId).revision !== expectedRevision) throw new Fault('REVISION_CONFLICT', 'Run changed during preparation');
+    this.store.assertWorkflowRunning(runId);
     const id = randomUUID();
     // Sibling storage makes rename/link same-volume in the usual workspace layout. EXDEV fails
     // closed; never fall back to a copy-and-delete move. The whole directory is retained.

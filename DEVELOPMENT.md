@@ -16,7 +16,7 @@ npm ci --registry=https://registry.npmjs.org
 npm test
 ```
 
-目前有 207 项自动化测试。真实 DSH 测试覆盖单实现者、完整评审/Gate、结构化需求逐项评审、四进程需求修订与失败修复链，以及“checkpoint → 中断并确认退出 → 新实现者 → 新评审 → 验收”三进程恢复链；离线 LLM adapter 调用真实工具，不发送网络模型请求、不需要 API key。显式集成测试进一步将真实 DSH 的候选写回临时项目，保留期间新增的用户文件并重新验收；冲突链覆盖读取三方内容、产生新候选、独立评审、再次显式集成。其他测试覆盖去重、身份/版本拒绝、候选和上下文篡改、读取凭证撤销、失败/超时/输入改写、暂停竞态、重载、产物权限与分页、三方冲突、SQLite 恢复、真实子进程退出边界、取消、保留当前文件、需求修订与后代失效、历史基线、新工作项事务回滚、越界变更与漏评/重复需求 ID。这不等同于真实模型效果验收。
+目前有 227 项自动化测试。真实 DSH 测试覆盖单实现者、完整评审/Gate、结构化需求逐项评审、四进程需求修订与失败修复链，以及“checkpoint → 中断并确认退出 → 新实现者 → 新评审 → 验收”三进程恢复链；离线 LLM adapter 调用真实工具，不发送网络模型请求、不需要 API key。显式集成测试进一步将真实 DSH 的候选写回临时项目，保留期间新增的用户文件并重新验收；冲突链覆盖读取三方内容、产生新候选、独立评审、再次显式集成。其他测试覆盖去重、身份/版本拒绝、候选和上下文篡改、读取凭证撤销、失败/超时/输入改写、暂停竞态、重载、产物权限与分页、三方冲突、SQLite 恢复、真实子进程退出边界、取消、保留当前文件、需求修订与后代失效、历史基线、新工作项事务回滚、越界变更与漏评/重复需求 ID。新增整条任务链控制测试覆盖聚合版本、父子 hold、共享预算耗尽、取消隔离、事务回滚、最终写回中断/排空和持久恢复。这不等同于真实模型效果或多天连续运行验收。
 
 测试只使用临时 DSH_HOME，不修改用户 DSH profile。测试生成的临时副本和状态在结束后清理。
 
@@ -83,8 +83,8 @@ dsh --profile web --patch C:\work\teamwork-dsh\examples\host.cordis.patch.yml
 | 工具 | 输入 |
 |---|---|
 | `teamwork_start` | `commandId`、`objective`，可选 `spec: {requirements, writeScope}` |
-| `teamwork_status` | `runId` |
-| `teamwork_control` | `runId`、`commandId`、`expectedRevision`、`type: "cancel" / "pause" / "resume" / "revise" / "budget"`；budget 需新总上限、expectedBudgetRevision 和 reason；pause 可带 `mode`；revise 必须有完整 `objective`、`spec`、`reason` |
+| `teamwork_status` | `runId`；可选 `scope: "run" / "workflow"`，默认单 Run |
+| `teamwork_control` | 默认单 Run：`runId`、`commandId`、`expectedRevision`、`type: "cancel" / "pause" / "resume" / "revise" / "budget"`；budget 需新总上限、expectedBudgetRevision 和 reason；revise 必须有完整 `objective`、`spec`、`reason`。`scope: "workflow"` 则使用 `expectedWorkflowRevision`，支持整条子树 pause/resume/cancel；pause 可带 `mode` |
 | `teamwork_inspect` | `runId`、`kind: "artifacts" / "manifest" / "file" / "changes" / "integration" / "integrations"`，其他字段见下节 |
 | `teamwork_integrate` | `runId`、`commandId`、`expectedRevision`、`type: "integrate" / "cancel" / "abandon" / "resolve"`，计划/集成 ID 与决策字段见集成章节 |
 
@@ -230,7 +230,34 @@ Runtime 等当前模型 Attempt 排空后串行集成，期间不派发新工作
 
 子 Run、outbox、根自动意图的 resolutionRunId 和请求回执在同一事务中提交。重启可从已提交冲突继续创建子任务，也可恢复已存在的待派发子任务，不重复派发；与人工 resolve 竞争时复用先提交的同一个子任务。暂停/取消可以撤销尚未提交的自动意图；prepare 完成后还会在提交事务里检查授权。
 
-自动任务派生后，父 Run 保留历史 conflict 状态，`automaticIntegration.resolutionRunId` 指向实际继续执行的子 Run；按该指针跟随进一步后代。对已派生父 Run 的普通 pause/resume/cancel 返回 DERIVED_CONTROL_REQUIRED 并给出子 Run ID，不会谎称已停止子进程；控制活动子 Run 或它的 integrationId 即可，无须重新批准整个工作。统一的根级工作流状态/递归控制仍待实现。历史控制命令的完全相同重试仍返回原回执，不受后续派生影响。
+自动任务派生后，父 Run 保留历史 conflict 状态，`automaticIntegration.resolutionRunId` 指向实际继续执行的子 Run。使用下文 `scope: "workflow"` 可直接在根任务上跟踪和控制整条链，无需逐个批准或控制子任务。兼容的单 Run pause/resume/cancel 仍返回 DERIVED_CONTROL_REQUIRED 并给出子 Run ID，防止把单 Run 操作误认为递归停止。历史控制命令的完全相同重试仍返回原回执，不受后续派生影响。
+
+### 整条任务链的状态与控制
+
+`teamwork_status({"runId":"<root>","scope":"workflow"})` 返回根任务和所有已登记后代的状态、集成记录、去重共享预算、活动 Run 和有效叶节点。父任务的历史 conflict 不会遮蔽修复子任务已经完成的最终集成。`state: integrated` 需要有效叶节点的最终合并树通过验收；`verified` 仅表示候选验收完成，二者不混用。未知进程或未处理的失败写入优先报告 blocked。
+
+控制示例（版本必须来自刚查询的 workflow.revision）：
+
+```json
+{
+  "runId": "<root>",
+  "scope": "workflow",
+  "commandId": "pause-entire-workflow-001",
+  "expectedWorkflowRevision": "<64 位聚合版本摘要>",
+  "type": "pause",
+  "mode": "drain"
+}
+```
+
+HTTP 对应 GET `/v1/runs/{id}/workflow`、POST `/v1/runs/{id}/workflow/commands`；POST body 不含 runId/scope。接口仅允许 host 凭证。聚合查询使用同一个 SQLite 读取快照，版本包含所有成员、集成 journal、共享预算及父级/子级控制记录；任一变化都会拒绝陈旧操作。暂停/取消意图、所有相关 Run/outbox/集成取消、控制记录、事件与唯一命令回执在一个事务中提交。HTTP 202 仅证明命令接受，不是退出证明；重新查询实际状态。
+
+- `pause` 默认 drain：阻止新派发、新派生任务和未开始的写回，等待已运行任务及已 claim 的写入结束；状态先为 pausing，确认结束后才为 paused。interrupt 请求中断所拥有的运行进程。
+- `resume`：等待整组相关进程确定停止；保留子树独立的暂停/取消记录，不越过父级 hold，不重置共享预算，也不重新批准普通步骤。已消耗预算不足时整条恢复事务回滚。继续实现时使用新 Attempt，而非重连旧进程。
+- `cancel`：取消所有已登记后代、待派发自动意图及可取消的集成，并永久关闭该子树的派发授权。取消不能改成暂停再恢复；新的完整工作需要另建根任务。取消不保证文件回滚。
+
+已写入的集成被 interrupt/cancel 时可能保留部分文件、备份和 source lease，状态为 blocked，不能伪装成安全可恢复的暂停。已有显式“保留当前文件”决定可在 hold 下完成清理并释放其拥有的 lease，但这不等于最终验收成功，也不隐含重新开始模型工作。未知进程不能用此决定跳过退出核对。
+
+可将 runId 指向某个子任务只控制其后代，不影响兄弟任务或其他根任务。当前 Runtime 串行处理 source 集成；暂停的 prepared 集成保留 source lease，因此也会阻止新任务派发，直至恢复或取消该集成；不会因此中断无关的已运行进程。所有控制是用户随时干预的能力，不是每个自主步骤都必须调用的审批点。多天连续运行和完整规划仍需后续验证。
 
 该自动路径只处理未写入的三方预检冲突。failed/blocked 集成仍须证明旧 writer/命令已停止，不能自动 abandon、还原备份或清除未知进程。完整长期自主运行还需要这类异常的证据对账及后续策略。
 

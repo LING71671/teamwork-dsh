@@ -39,6 +39,9 @@ test('host registers with real Cordis tools; reload removes old tools and never 
     const status = await ctx.tools.execute({ callId: 'status-call' as ToolExecutionInput['callId'],
       name: 'teamwork_status', arguments: { runId: run.id }, signal: new AbortController().signal });
     assert.equal(status.isError, false, JSON.stringify(status));
+    const workflow = await ctx.tools.execute({ callId: 'workflow-status' as ToolExecutionInput['callId'], name: 'teamwork_status',
+      arguments: { runId: run.id, scope: 'workflow' }, signal: new AbortController().signal });
+    assert.equal(workflow.isError, false, JSON.stringify(workflow)); assert.match(JSON.stringify(workflow), /leafRunIds/);
     await waitFor(() => f.store.get(run.id).phase === 'running' ? true : undefined);
     const current = f.store.get(run.id);
     assert.equal(current.budget?.reservedModelAttempts, 1);
@@ -47,7 +50,7 @@ test('host registers with real Cordis tools; reload removes old tools and never 
         expectedBudgetRevision: current.budget!.revision, maxModelAttempts: 12, reason: 'User approved a larger total allocation' }, signal: new AbortController().signal });
     assert.equal(allocate.isError, false, JSON.stringify(allocate)); assert.equal(f.store.get(run.id).budget?.maxModelAttempts, 12);
     const pause = await ctx.tools.execute({ callId: 'pause-call' as ToolExecutionInput['callId'], name: 'teamwork_control',
-      arguments: { runId: run.id, commandId: 'pause', type: 'pause', mode: 'interrupt', expectedRevision: f.store.get(run.id).revision }, signal: new AbortController().signal });
+      arguments: { runId: run.id, scope: 'workflow', commandId: 'pause', type: 'pause', mode: 'interrupt', expectedWorkflowRevision: f.store.workflow(run.id).revision }, signal: new AbortController().signal });
     assert.equal(pause.isError, false, JSON.stringify(pause));
     await waitFor(() => f.store.get(run.id).phase === 'paused' ? true : undefined);
     const inspect = await ctx.tools.execute({ callId: 'inspect-call' as ToolExecutionInput['callId'], name: 'teamwork_inspect',
@@ -62,7 +65,7 @@ test('host registers with real Cordis tools; reload removes old tools and never 
     assert.match(JSON.stringify(preview), /readOnly/);
     assert.match(JSON.stringify(preview), /candidateVerified/);
     const resume = await ctx.tools.execute({ callId: 'resume-call' as ToolExecutionInput['callId'], name: 'teamwork_control',
-      arguments: { runId: run.id, commandId: 'resume', type: 'resume', expectedRevision: f.store.get(run.id).revision }, signal: new AbortController().signal });
+      arguments: { runId: run.id, scope: 'workflow', commandId: 'resume', type: 'resume', expectedWorkflowRevision: f.store.workflow(run.id).revision }, signal: new AbortController().signal });
     assert.equal(resume.isError, false, JSON.stringify(resume));
     await waitFor(() => f.store.get(run.id).phase === 'running' ? true : undefined);
     assert.notEqual(f.store.get(run.id).order.attemptId, run.order.attemptId);

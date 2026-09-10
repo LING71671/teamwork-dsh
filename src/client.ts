@@ -1,6 +1,6 @@
 import { Fault, protocolVersion, type Run, type StartCommand, type CancelCommand, type BridgeCommand, type ControlCommand,
   type ArtifactDescriptor, type ArtifactPage, type ArtifactFile, type ChangePage, type IntegrationPreview, type IntegrateCommand, type IntegrationStatus, type AbandonIntegrationCommand,
-  type ResolveIntegrationCommand, type ContextQuery, type ContextResult } from './contracts.js';
+  type ResolveIntegrationCommand, type ContextQuery, type ContextResult, type WorkflowStatus, type WorkflowControlCommand } from './contracts.js';
 
 export class Client {
   private readonly url: string;
@@ -38,6 +38,10 @@ export class Client {
   }
   start(input: StartCommand, signal?: AbortSignal): Promise<Run> { return this.request('/v1/runs', input, signal); }
   status(id: string, signal?: AbortSignal): Promise<Run> { return this.request(`/v1/runs/${encodeURIComponent(id)}`, undefined, signal); }
+  workflow(id: string, signal?: AbortSignal): Promise<WorkflowStatus> { return this.request(`/v1/runs/${encodeURIComponent(id)}/workflow`, undefined, signal); }
+  controlWorkflow(id: string, input: WorkflowControlCommand, signal?: AbortSignal): Promise<WorkflowStatus> {
+    return this.request(`/v1/runs/${encodeURIComponent(id)}/workflow/commands`, input, signal);
+  }
   cancel(id: string, input: CancelCommand, signal?: AbortSignal): Promise<Run> {
     return this.control(id, input, signal);
   }

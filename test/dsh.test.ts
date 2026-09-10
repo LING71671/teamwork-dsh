@@ -64,6 +64,9 @@ for (const verification of [false, true, 'repair', 'pause', 'resolution', 'revis
       const childId = await waitFor(() => f.store.get(run.id).automaticIntegration?.resolutionRunId, 30_000);
       const completed = await waitFor(() => { const child = f.store.get(childId); return child.integration?.phase === 'succeeded' ? child : undefined; }, 40_000);
       assert.equal(completed.gate, 'passed'); assert.equal(completed.budget?.reservedModelAttempts, 4);
+      const workflow = await f.client.workflow(run.id);
+      assert.equal(workflow.state, 'integrated'); assert.deepEqual(workflow.leafRunIds, [childId]);
+      assert.equal(workflow.runs.length, 2); assert.equal(workflow.budgets.length, 1);
       assert.equal(launched, 4); assert.equal(exited, 4); assert.equal(captures.length, 4);
       assert.equal(new Set(captures.map(c => c.sessionId)).size, 4);
       assert.match(JSON.stringify(captures.slice(2).flatMap(c => c.events)), /teamwork_context/);

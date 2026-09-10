@@ -69,6 +69,9 @@ test('one upfront grant drives conflict child, scoped references, independent re
     await finish(f.fake, 2); const ready = await integrated(f.store, child.id);
     assert.equal(ready.budget?.reservedModelAttempts, 4); assert.equal(f.fake.instances.length, 4);
     assert.equal(f.store.get(f.run.id).integration?.phase, 'conflict');
+    const workflow = await f.client.workflow(f.run.id);
+    assert.equal(workflow.state, 'integrated'); assert.deepEqual(workflow.leafRunIds, [child.id]);
+    assert.equal(workflow.integrations.length, 2); assert.equal(workflow.budgets.length, 1);
     assert.equal(await readFile(join(f.source, 'hello.txt'), 'utf8'), 'fixed + user'); assert.equal(await readFile(join(f.source, 'user-only'), 'utf8'), 'keep');
   } finally { await f.cleanup(); }
 });
@@ -99,6 +102,8 @@ test('repeated user conflicts create bounded descendants without duplicating inh
     await finish(f.fake, 4, 'fixed + new user'); const ready = await integrated(f.store, grandchild.id);
     assert.equal(ready.budget?.reservedModelAttempts, 6); assert.equal(f.fake.instances.length, 6); assert.equal(f.store.all().length, 3);
     assert.equal(await readFile(join(f.source, 'hello.txt'), 'utf8'), 'fixed + new user');
+    const workflow = await f.client.workflow(f.run.id);
+    assert.equal(workflow.state, 'integrated'); assert.deepEqual(workflow.leafRunIds, [grandchild.id]);
   } finally { await f.cleanup(); }
 });
 

@@ -5,9 +5,11 @@ import { Fault, terminal, type Run, type Event, type StartCommand, type CancelCo
   type BridgeCommand, type Phase, type VerificationPolicy, type Candidate, type WorkOrder, type ValidationResult,
   type PauseCommand, type ResumeCommand, type PauseContinuation, type RoundEvidence, type ArtifactDescriptor, type ResolveIntegrationCommand,
   type ResolutionContext, type RevisionContext, type ReviseCommand, type ScopeCheck, type BudgetCommand, type ModelBudgetStatus,
-  type AutomaticIntegration, type ControlCommand, startSchema, reviseSchema, budgetCommandSchema } from './contracts.js';
+  type AutomaticIntegration, type ControlCommand, type WorkflowHold, type WorkflowStatus, type WorkflowControlCommand,
+  startSchema, reviseSchema, budgetCommandSchema, workflowControlSchema } from './contracts.js';
 import { activityPhase, evaluateGate, receive, transition, repairEligible, repairFeedback } from './kernel.js';
 import { IntegrationJournal, integrationStatus, automaticResolutionRequest } from './integration-journal.js';
+import { workflowStatus, activeRun, activeIntegration } from './workflow.js';
 
 export const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
 function canonical(value: unknown): string {
@@ -40,6 +42,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS model_budgets (root_run_id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS model_reservations (attempt_id TEXT PRIMARY KEY, root_run_id TEXT NOT NULL, run_id TEXT NOT NULL, role TEXT NOT NULL, at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS automatic_integrations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS workflow_controls (root_run_id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events (cursor INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id TEXT NOT NULL, revision INTEGER NOT NULL, type TEXT NOT NULL, at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS events_by_run ON events(run_id, cursor);`);
@@ -62,8 +65,8 @@ export class Store {
       this.db.prepare("INSERT OR IGNORE INTO metadata VALUES('profile',?)").run(hash);
     });
   }
-  private transaction<T>(body: () => T): T {
-    this.db.exec('BEGIN IMMEDIATE');
+  private transaction<T>(body: () => T, immediate = true): T {
+    this.db.exec(immediate ? 'BEGIN IMMEDIATE' : 'BEGIN');
     try { const result = body(); this.db.exec('COMMIT'); return result; }
     catch (error) { this.db.exec('ROLLBACK'); throw error; }
   }
@@ -101,6 +104,86 @@ export class Store {
     if (!row) throw new Fault('BUDGET_MISSING', 'Budget ledger is missing; dispatch is not authorized');
     return JSON.parse(row.data as string) as ModelBudgetStatus;
   }
+  private lineage(id: string): string[] {
+    const ids: string[] = [];
+    let next: string | undefined = id;
+    while (next) {
+      if (ids.includes(next)) throw new Fault('WORKFLOW_LINEAGE', 'Run lineage contains a cycle');
+      ids.push(next); const run = this.get(next); next = run.parentRunId ?? run.order.resolution?.parentRunId;
+    }
+    return ids;
+  }
+  workflowHeld(id: string): boolean {
+    return this.lineage(id).some(root => {
+      const row = this.db.prepare('SELECT data FROM workflow_controls WHERE root_run_id=?').get(root);
+      return row && (JSON.parse(row.data as string) as WorkflowHold).mode !== 'running';
+    });
+  }
+  assertWorkflowRunning(id: string): void {
+    if (this.workflowHeld(id)) throw new Fault('WORKFLOW_HELD', 'The selected workflow or an ancestor is paused/cancelled');
+  }
+  private workflowMembers(id: string): Run[] {
+    this.get(id); const all = this.all(), ids = new Set([id]);
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const run of all) if (!ids.has(run.id) && ids.has(run.parentRunId ?? run.order.resolution?.parentRunId ?? '')) { ids.add(run.id); changed = true; }
+    }
+    return all.filter(run => ids.has(run.id));
+  }
+  workflow(id: string): WorkflowStatus {
+    return this.transaction(() => this.workflowSnapshot(id), false);
+  }
+  private workflowSnapshot(id: string): WorkflowStatus {
+    const runs = this.workflowMembers(id), ids = new Set([...runs.map(run => run.id), ...this.lineage(id)]);
+    const holds = this.db.prepare('SELECT data FROM workflow_controls').all().map(row => JSON.parse(row.data as string) as WorkflowHold).filter(hold => ids.has(hold.rootRunId));
+    return workflowStatus(id, runs, runs.flatMap(run => this.integrations.forRun(run.id)), holds);
+  }
+  replayWorkflowControl(id: string, input: WorkflowControlCommand): WorkflowStatus | undefined {
+    const row = this.db.prepare('SELECT digest,response FROM commands WHERE id=?').get(`host:${input.commandId}`);
+    if (!row) return undefined;
+    if (row.digest !== digest(canonical({ workflowRootId: id, input }))) throw new Fault('IDEMPOTENCY_CONFLICT', 'Command ID reused with a different payload');
+    return JSON.parse(row.response as string) as WorkflowStatus;
+  }
+  controlWorkflow(id: string, input: WorkflowControlCommand): WorkflowStatus {
+    input = workflowControlSchema.parse(input);
+    return this.command(`host:${input.commandId}`, { workflowRootId: id, input }, () => {
+      const before = this.workflowSnapshot(id);
+      if (before.revision !== input.expectedWorkflowRevision) throw new Fault('WORKFLOW_REVISION_CONFLICT', 'A workflow member, integration, budget or hold changed');
+      const runs = this.workflowMembers(id), jobs = runs.flatMap(run => this.integrations.forRun(run.id));
+      const old = before.holds.find(hold => hold.rootRunId === id);
+      if (old?.mode === 'cancelled' && input.type !== 'cancel') throw new Fault('WORKFLOW_CANCELLED', 'Cancelled workflow authorization cannot be resumed or changed into a pause');
+      if (input.type === 'resume') {
+        const ancestors = new Set(this.lineage(id));
+        if (before.holds.some(hold => ancestors.has(hold.rootRunId) && hold.mode === 'cancelled')) throw new Fault('WORKFLOW_CANCELLED', 'Cancelled workflows cannot be resumed');
+        if (before.state === 'blocked' || runs.some(activeRun) || jobs.some(activeIntegration)) throw new Fault('WORKFLOW_NOT_STOPPED', 'Prove all affected processes stopped and reconcile blocked integrations before resuming');
+        if (old?.mode !== 'paused' && !runs.some(run => run.phase === 'paused' || run.automaticIntegration?.state === 'paused')) throw new Fault('WORKFLOW_NOT_PAUSED', 'No paused workflow work to resume');
+      }
+      const hold: WorkflowHold = { rootRunId: id, revision: (old?.revision ?? 0) + 1,
+        mode: input.type === 'resume' ? 'running' : input.type === 'pause' ? 'paused' : 'cancelled' };
+      this.db.prepare('INSERT OR REPLACE INTO workflow_controls VALUES(?,?)').run(id, JSON.stringify(hold));
+      if (input.type === 'resume') this.assertWorkflowRunning(id);
+      for (const member of runs) {
+        const run = this.get(member.id);
+        const base = { commandId: input.commandId, expectedRevision: run.revision };
+        if (input.type === 'cancel') this.cancelCurrent(run.id, { ...base, type: 'cancel' });
+        else if (input.type === 'pause') {
+          if ((!terminal(run.phase) && run.phase !== 'stopping') || (run.phase === 'verified' && run.automaticIntegration?.state === 'pending')) {
+            const mode = run.pause?.mode === 'interrupt' ? 'interrupt' : input.mode;
+            this.pauseCurrent(run.id, { ...base, type: 'pause', mode });
+          }
+        } else if (!this.workflowHeld(run.id) && (run.phase === 'paused' || run.automaticIntegration?.state === 'paused')) {
+          this.resumeCurrent(run.id, { ...base, type: 'resume' });
+        }
+      }
+      for (const job of jobs) if (['prepared', 'applying', 'snapshotting', 'validating'].includes(job.phase) &&
+          (input.type === 'cancel' || (input.type === 'pause' && input.mode === 'interrupt' && job.dispatch === 'claimed'))) {
+        this.integrations.cancelWithinTransaction(job.runId, job.id, this.integrations.get(job.id).revision);
+      }
+      const root = this.get(id);
+      this.save({ ...root, revision: root.revision + 1, updatedAt: new Date().toISOString() }, `workflow.${input.type}_requested`);
+      return this.workflowSnapshot(id);
+    });
+  }
   automatic(id: string): AutomaticIntegration {
     const row = this.db.prepare('SELECT data FROM automatic_integrations WHERE id=?').get(id);
     if (!row) throw new Fault('NOT_FOUND', 'Automatic integration intent does not exist', 404);
@@ -108,7 +191,7 @@ export class Store {
   }
   pendingAutomatic(): AutomaticIntegration[] {
     return this.db.prepare("SELECT data FROM automatic_integrations WHERE json_extract(data,'$.state')='pending' ORDER BY rowid")
-      .all().map(row => JSON.parse(row.data as string) as AutomaticIntegration);
+      .all().map(row => JSON.parse(row.data as string) as AutomaticIntegration).filter(intent => !this.workflowHeld(intent.runId));
   }
   private saveAutomatic(run: Run, intent: AutomaticIntegration, type: string): Run {
     this.db.prepare('INSERT OR REPLACE INTO automatic_integrations VALUES(?,?)').run(intent.id, JSON.stringify(intent));
@@ -244,6 +327,7 @@ export class Store {
     executionProfile: unknown, context: ResolutionContext, automaticId?: string): Run {
     return this.integrations.resolve(parentId, integrationId, input, () => {
       const parent = this.get(parentId);
+      this.assertWorkflowRunning(parentId);
       const job = this.integrations.get(integrationId);
       const automatic = automaticId ? this.automatic(automaticId) : undefined;
       if (automatic && (automatic.state !== 'pending' || automatic.runId !== parentId || parent.automaticIntegration?.id !== automatic.id ||
@@ -360,10 +444,11 @@ export class Store {
   }
   pending(): string[] {
     return this.db.prepare("SELECT run_id FROM outbox JOIN runs ON runs.id=outbox.run_id WHERE state='pending' ORDER BY json_extract(runs.data,'$.updatedAt'),run_id")
-      .all().map(r => r.run_id as string);
+      .all().map(r => r.run_id as string).filter(id => !this.workflowHeld(id));
   }
   claim(id: string, token: string): Run {
     return this.transaction(() => {
+      this.assertWorkflowRunning(id);
       const row = this.db.prepare('SELECT state FROM outbox WHERE run_id=?').get(id);
       if (row?.state !== 'pending') throw new Fault('DISPATCH_CLAIMED', 'Dispatch is already owned');
       let current = this.get(id);
@@ -395,7 +480,9 @@ export class Store {
     });
   }
   cancel(id: string, input: CancelCommand): Run {
-    return this.command(`host:${input.commandId}`, { id, input }, () => {
+    return this.command(`host:${input.commandId}`, { id, input }, () => this.cancelCurrent(id, input));
+  }
+  private cancelCurrent(id: string, input: CancelCommand): Run {
       const run = this.get(id);
       if (run.revision !== input.expectedRevision) throw new Fault('REVISION_CONFLICT', `Current revision is ${run.revision}`);
       if (run.automaticIntegration && ['pending', 'paused'].includes(run.automaticIntegration.state)) {
@@ -405,10 +492,11 @@ export class Store {
       const next = this.save(transition(run, ['queued', 'repair_queued', 'verification_queued', 'paused'].includes(run.phase) ? 'cancelled' : 'stopping'), 'run.cancel_requested');
       if (next.phase === 'cancelled') this.db.prepare("UPDATE outbox SET state='done' WHERE run_id=?").run(id);
       return next;
-    });
   }
   pause(id: string, input: PauseCommand): Run {
-    return this.command(`host:${input.commandId}`, { id, input }, () => {
+    return this.command(`host:${input.commandId}`, { id, input }, () => this.pauseCurrent(id, input));
+  }
+  private pauseCurrent(id: string, input: PauseCommand): Run {
       const run = this.get(id);
       if (run.revision !== input.expectedRevision) throw new Fault('REVISION_CONFLICT', `Current revision is ${run.revision}`);
       if (run.phase === 'verified' && run.automaticIntegration && ['pending', 'paused'].includes(run.automaticIntegration.state)) {
@@ -424,7 +512,6 @@ export class Store {
         pause: { mode: input.mode, stage, ...(queued ? { continuation: { kind: 'queued', phase: stage } as PauseContinuation } : {}) } };
       if (queued) this.db.prepare("UPDATE outbox SET state='paused' WHERE run_id=?").run(id);
       return this.save(next, queued ? 'run.paused' : 'run.pause_requested');
-    });
   }
   finishPause(id: string, continuation: PauseContinuation): Run {
     return this.transaction(() => {
@@ -441,7 +528,10 @@ export class Store {
     });
   }
   resume(id: string, input: ResumeCommand): Run {
-    return this.command(`host:${input.commandId}`, { id, input }, () => {
+    return this.command(`host:${input.commandId}`, { id, input }, () => this.resumeCurrent(id, input));
+  }
+  private resumeCurrent(id: string, input: ResumeCommand): Run {
+      this.assertWorkflowRunning(id);
       const run = this.get(id);
       if (run.revision !== input.expectedRevision) throw new Fault('REVISION_CONFLICT', `Current revision is ${run.revision}`);
       if (run.phase === 'verified' && run.automaticIntegration?.state === 'paused') {
@@ -470,7 +560,6 @@ export class Store {
       const result = transition(next, phase);
       this.db.prepare('UPDATE outbox SET state=? WHERE run_id=?').run(phase === 'submitted' ? 'done' : 'pending', id);
       return this.save(result, 'run.resumed');
-    });
   }
   queueVerification(id: string, candidate: Candidate): Run {
     return this.transaction(() => {
