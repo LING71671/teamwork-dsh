@@ -15,7 +15,7 @@ test('SDK result rejects idle without turn/end, error and max-tokens outcomes', 
   }
 });
 
-for (const verification of [false, true, 'repair', 'pause', 'resolution', 'revision'] as const) test(`real DSH SDK + Cordis workers, offline provider, verification=${verification}`, { timeout: 90_000 }, async () => {
+for (const verification of [false, true, 'repair', 'pause', 'resolution', 'revision', 'automatic'] as const) test(`real DSH SDK + Cordis workers, offline provider, verification=${verification}`, { timeout: 90_000 }, async () => {
   const fixtureHome = await mkdtemp(join(tmpdir(), 'teamwork-dsh-integration-'));
   const patch = join(fixtureHome, 'offline.patch.yml');
   const provider = new URL('./fixtures/offline-provider.js', import.meta.url).href;
@@ -47,12 +47,16 @@ for (const verification of [false, true, 'repair', 'pause', 'resolution', 'revis
     args: ['-e', verification === 'resolution' || verification === 'revision' ? "require('node:assert').ok(require('node:fs').readFileSync('hello.txt','utf8').startsWith('changed through real DSH tool'))"
       : "require('node:assert').equal(require('node:fs').readFileSync('hello.txt','utf8'),'changed through real DSH tool')"],
     timeoutMs: 5_000,
-  }] } : undefined, verification === true || verification === 'resolution' || verification === 'revision');
+  }] } : undefined, verification === true || verification === 'resolution' || verification === 'revision' || verification === 'automatic');
   try {
     const run = await f.client.start({ commandId: 'real-dsh', objective: 'Exercise offline plugin integration', ...(verification === true ? {
       budget: { maxModelAttempts: 1 },
       spec: { requirements: [{ id: 'readback', text: 'hello.txt must contain changed through real DSH tool' }], writeScope: { files: ['hello.txt'], trees: [] } },
+    } : {}), ...(verification === 'automatic' ? {
+      autonomy: { integration: 'on-gate-pass' as const }, budget: { maxModelAttempts: 2 },
+      spec: { requirements: [], writeScope: { files: ['hello.txt'], trees: [] } },
     } : {}) });
+    if (verification === 'automatic') await writeFile(join(f.source, 'concurrent-user-file'), 'preserved by integration');
     if (verification === true) {
       const stopped = await waitFor(() => { const r = f.store.get(run.id); return r.phase === 'paused' ? r : undefined; }, 25_000);
       assert.equal(stopped.reason, 'BUDGET_EXHAUSTED'); assert.equal(launched, 1); assert.equal(exited, 1);
@@ -103,14 +107,21 @@ for (const verification of [false, true, 'repair', 'pause', 'resolution', 'revis
     }
     assert.equal(settled.checkpoint?.summary, 'Offline DSH plugin integration exercise');
     assert.equal(await readFile(join(settled.order.workspace, 'hello.txt'), 'utf8'), 'changed through real DSH tool', diagnostic);
-    assert.equal(await readFile(join(f.source, 'hello.txt'), 'utf8'), 'original');
-    if (verification === true) {
+    if (verification !== 'automatic') assert.equal(await readFile(join(f.source, 'hello.txt'), 'utf8'), 'original');
+    if (verification === true || verification === 'automatic') {
       assert.deepEqual(settled.scopeCheck?.violations, []);
-      assert.equal(settled.reviewAttempt?.report?.review?.requirements?.[0]?.id, 'readback');
-      await writeFile(join(f.source, 'concurrent-user-file'), 'preserved by integration');
-      const preview = await f.client.previewIntegration(run.id);
-      const integration = await f.client.integrate(run.id, { commandId: 'integrate-real-dsh', type: 'integrate', planId: preview.id,
-        expectedRevision: (await f.client.status(run.id)).revision });
+      let integration;
+      if (verification === true) {
+        assert.equal(settled.reviewAttempt?.report?.review?.requirements?.[0]?.id, 'readback');
+        await writeFile(join(f.source, 'concurrent-user-file'), 'preserved by integration');
+        const preview = await f.client.previewIntegration(run.id);
+        integration = await f.client.integrate(run.id, { commandId: 'integrate-real-dsh', type: 'integrate', planId: preview.id,
+          expectedRevision: (await f.client.status(run.id)).revision });
+      } else {
+        integration = await waitFor(() => f.store.get(run.id).integration);
+        assert.equal(f.store.get(run.id).budget?.reservedModelAttempts, 2);
+        assert.equal(f.store.get(run.id).automaticIntegration?.integrationId, integration.id);
+      }
       const integrated = await waitFor(() => {
         const value = f.store.integrations.get(integration.id);
         return ['succeeded', 'failed', 'blocked'].includes(value.phase) ? value : undefined;

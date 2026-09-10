@@ -5,7 +5,7 @@ import { Fault, terminal, type Run, type Event, type StartCommand, type CancelCo
   type BridgeCommand, type Phase, type VerificationPolicy, type Candidate, type WorkOrder, type ValidationResult,
   type PauseCommand, type ResumeCommand, type PauseContinuation, type RoundEvidence, type ArtifactDescriptor, type ResolveIntegrationCommand,
   type ResolutionContext, type RevisionContext, type ReviseCommand, type ScopeCheck, type BudgetCommand, type ModelBudgetStatus,
-  startSchema, reviseSchema, budgetCommandSchema } from './contracts.js';
+  type AutomaticIntegration, startSchema, reviseSchema, budgetCommandSchema } from './contracts.js';
 import { activityPhase, evaluateGate, receive, transition, repairEligible, repairFeedback } from './kernel.js';
 import { IntegrationJournal, integrationStatus } from './integration-journal.js';
 
@@ -39,6 +39,7 @@ export class Store {
       CREATE INDEX IF NOT EXISTS artifacts_by_run ON artifacts(run_id, id);
       CREATE TABLE IF NOT EXISTS model_budgets (root_run_id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS model_reservations (attempt_id TEXT PRIMARY KEY, root_run_id TEXT NOT NULL, run_id TEXT NOT NULL, role TEXT NOT NULL, at TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS automatic_integrations (id TEXT PRIMARY KEY, data TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events (cursor INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id TEXT NOT NULL, revision INTEGER NOT NULL, type TEXT NOT NULL, at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS events_by_run ON events(run_id, cursor);`);
@@ -99,6 +100,27 @@ export class Store {
     const row = this.db.prepare('SELECT data FROM model_budgets WHERE root_run_id=?').get(rootRunId);
     if (!row) throw new Fault('BUDGET_MISSING', 'Budget ledger is missing; dispatch is not authorized');
     return JSON.parse(row.data as string) as ModelBudgetStatus;
+  }
+  automatic(id: string): AutomaticIntegration {
+    const row = this.db.prepare('SELECT data FROM automatic_integrations WHERE id=?').get(id);
+    if (!row) throw new Fault('NOT_FOUND', 'Automatic integration intent does not exist', 404);
+    return JSON.parse(row.data as string) as AutomaticIntegration;
+  }
+  pendingAutomatic(): AutomaticIntegration[] {
+    return this.db.prepare("SELECT data FROM automatic_integrations WHERE json_extract(data,'$.state')='pending' ORDER BY rowid")
+      .all().map(row => JSON.parse(row.data as string) as AutomaticIntegration);
+  }
+  private saveAutomatic(run: Run, intent: AutomaticIntegration, type: string): Run {
+    this.db.prepare('INSERT OR REPLACE INTO automatic_integrations VALUES(?,?)').run(intent.id, JSON.stringify(intent));
+    return this.save({ ...run, automaticIntegration: intent, revision: run.revision + 1, updatedAt: new Date().toISOString() }, type);
+  }
+  finishAutomatic(id: string, result: { integrationId: string } | { reason: string }): void {
+    this.transaction(() => {
+      const intent = this.automatic(id), run = this.get(intent.runId);
+      if (intent.state !== 'pending' || run.automaticIntegration?.id !== id) return;
+      this.saveAutomatic(run, { ...intent, state: 'integrationId' in result ? 'scheduled' : 'failed', ...result },
+        'integrationId' in result ? 'automatic.integration_scheduled' : 'automatic.integration_failed');
+    });
   }
   /** Reservation precedes executor creation. Failed/unknown dispatch is conservatively charged, never refunded. */
   reserveModelAttempt(id: string, attemptId: string): boolean {
@@ -206,9 +228,10 @@ export class Store {
       const order = { runId: id, workItemId: randomUUID(), attemptId, dispatchKey: randomUUID(),
         epoch: 1, specRevision: 1, objective: input.objective, spec,
         inputDigest: digest(canonical({ objective: input.objective, spec, workspace, executionProfile,
-          ...(verification ? { verification } : {}), ...(input.budget ? { budget: input.budget } : {}) })),
+          ...(verification ? { verification } : {}), ...(input.budget ? { budget: input.budget } : {}), ...(input.autonomy ? { autonomy: input.autonomy } : {}) })),
         workspace: join(workspace, attemptId, 'work') };
       const run: Run = { id, revision: 0, phase: 'queued', gate: 'not_evaluated', order, iteration: 1, history: [], createdAt: at, updatedAt: at,
+        ...(input.autonomy ? { autonomy: input.autonomy } : {}),
         ...(verification ? { verification } : {}), ...(input.budget ? { budget: { rootRunId: id, revision: 0,
           maxModelAttempts: input.budget.maxModelAttempts, reservedModelAttempts: 0 } } : {}) };
       if (run.budget) this.db.prepare('INSERT INTO model_budgets VALUES(?,?)').run(id, JSON.stringify(run.budget));
@@ -231,6 +254,7 @@ export class Store {
       const id = randomUUID(), attemptId = randomUUID(), at = new Date().toISOString();
       let run: Run = { id, revision: 0, phase: 'queued', gate: 'not_evaluated', iteration: 1, history: [], createdAt: at, updatedAt: at,
         verification: parent.verification, parentRunId: parent.id, ...(parent.budget ? { budget: parent.budget } : {}),
+        ...(parent.autonomy ? { autonomy: parent.autonomy } : {}),
         order: { runId: id, workItemId: randomUUID(), attemptId, dispatchKey: randomUUID(), epoch: 1, specRevision: parent.order.specRevision + 1,
           objective: parent.order.objective, ...(parent.order.spec ? { spec: parent.order.spec } : {}),
           workspace: join(workspace, attemptId, 'work'), inputDigest: '', resolution: context } };
@@ -290,10 +314,15 @@ export class Store {
       if (context.previousSpecRevision !== old.order.specRevision || context.reason !== input.reason) throw new Fault('REVISION_CONTEXT_STALE', 'Revision references do not match the previous specification');
       const attemptId = randomUUID(), at = new Date().toISOString(), specRevision = old.order.specRevision + 1;
       const { specHistory: _history, ...previous } = old;
+      if (old.automaticIntegration && ['pending', 'paused'].includes(old.automaticIntegration.state)) {
+        const intent = { ...old.automaticIntegration, state: 'cancelled', reason: 'SPEC_REVISED' };
+        this.db.prepare('UPDATE automatic_integrations SET data=? WHERE id=?').run(JSON.stringify(intent), intent.id);
+      }
       const parentRunId = old.parentRunId ?? old.order.resolution?.parentRunId;
       let run: Run = { id, revision: old.revision + 1, phase: 'queued', gate: 'not_evaluated', iteration: 1, history: [],
         createdAt: old.createdAt, updatedAt: at,
         ...(old.budget ? { budget: old.budget } : {}),
+        ...(input.autonomy ? { autonomy: input.autonomy } : {}),
         ...(old.verification ? { verification: old.verification } : {}), ...(parentRunId ? { parentRunId } : {}),
         specHistory: [...(old.specHistory ?? []), { reason: input.reason, at, previous }],
         order: { runId: id, workItemId: old.order.workItemId, attemptId, dispatchKey: randomUUID(), epoch: old.order.epoch + 1,
@@ -304,9 +333,14 @@ export class Store {
         ...(context.inputs.proposal ? { proposal: this.registerArtifact(run, context.inputs.proposal, 'context') } : {}) } };
       run = { ...run, baseline: current, order: { ...run.order, revisionContext,
         inputDigest: digest(canonical({ previousInput: old.order.inputDigest, objective: input.objective, spec: input.spec, specRevision,
-          epoch: run.order.epoch, revisionContext, verification: old.verification })) } };
+          epoch: run.order.epoch, revisionContext, verification: old.verification, ...(input.autonomy ? { autonomy: input.autonomy } : {}) })) } };
       for (const child of descendants) {
         if (child.phase === 'superseded') continue;
+        if (child.automaticIntegration && ['pending', 'paused'].includes(child.automaticIntegration.state)) {
+          const intent = { ...child.automaticIntegration, state: 'cancelled' as const, reason: 'PARENT_SPEC_REVISED' };
+          this.db.prepare('UPDATE automatic_integrations SET data=? WHERE id=?').run(JSON.stringify(intent), intent.id);
+          child.automaticIntegration = intent;
+        }
         this.save({ ...child, phase: 'superseded', gate: 'not_evaluated', revision: child.revision + 1, updatedAt: at,
           supersededBy: { runId: id, specRevision }, reason: 'PARENT_SPEC_REVISED' }, 'run.superseded');
         this.db.prepare("UPDATE outbox SET state='done' WHERE run_id=?").run(child.id);
@@ -356,6 +390,9 @@ export class Store {
     return this.command(`host:${input.commandId}`, { id, input }, () => {
       const run = this.get(id);
       if (run.revision !== input.expectedRevision) throw new Fault('REVISION_CONFLICT', `Current revision is ${run.revision}`);
+      if (run.automaticIntegration && ['pending', 'paused'].includes(run.automaticIntegration.state)) {
+        return this.saveAutomatic(run, { ...run.automaticIntegration, state: 'cancelled', reason: 'USER_CANCELLED' }, 'automatic.integration_cancelled');
+      }
       if (terminal(run.phase) || run.phase === 'stopping') return run;
       const next = this.save(transition(run, ['queued', 'repair_queued', 'verification_queued', 'paused'].includes(run.phase) ? 'cancelled' : 'stopping'), 'run.cancel_requested');
       if (next.phase === 'cancelled') this.db.prepare("UPDATE outbox SET state='done' WHERE run_id=?").run(id);
@@ -366,6 +403,10 @@ export class Store {
     return this.command(`host:${input.commandId}`, { id, input }, () => {
       const run = this.get(id);
       if (run.revision !== input.expectedRevision) throw new Fault('REVISION_CONFLICT', `Current revision is ${run.revision}`);
+      if (run.phase === 'verified' && run.automaticIntegration && ['pending', 'paused'].includes(run.automaticIntegration.state)) {
+        if (run.automaticIntegration.state === 'paused') return run;
+        return this.saveAutomatic(run, { ...run.automaticIntegration, state: 'paused' }, 'automatic.integration_paused');
+      }
       if (terminal(run.phase) || run.phase === 'stopping') throw new Fault('NOT_PAUSABLE', 'Run is not accepting pause');
       if (run.phase === 'paused' || (run.phase === 'pausing' && run.pause!.mode === input.mode)) return run;
       if (run.phase === 'pausing' && input.mode !== 'interrupt') throw new Fault('PAUSE_IN_PROGRESS', 'An interrupt cannot be downgraded to drain');
@@ -395,6 +436,9 @@ export class Store {
     return this.command(`host:${input.commandId}`, { id, input }, () => {
       const run = this.get(id);
       if (run.revision !== input.expectedRevision) throw new Fault('REVISION_CONFLICT', `Current revision is ${run.revision}`);
+      if (run.phase === 'verified' && run.automaticIntegration?.state === 'paused') {
+        return this.saveAutomatic(run, { ...run.automaticIntegration, state: 'pending' }, 'automatic.integration_resumed');
+      }
       if (run.phase !== 'paused' || !run.pause?.continuation) throw new Fault('NOT_PAUSED', 'Only a fully paused run may resume');
       const plan = run.pause.continuation;
       if (plan.kind !== 'submitted' && run.budget && run.budget.reservedModelAttempts >= run.budget.maxModelAttempts) throw new Fault('BUDGET_EXHAUSTED', 'Authorize more budget on the root Run before resuming');
@@ -472,7 +516,12 @@ export class Store {
       const result = transition({ ...run, gate: reasons.length ? 'failed' : 'passed', gateReasons: reasons },
         reasons.length ? (repair ? 'repair_queued' : 'rejected') : 'verified');
       this.db.prepare('UPDATE outbox SET state=? WHERE run_id=?').run(repair ? 'pending' : 'done', id);
-      return this.save(result, repair ? 'gate.failed_repair_queued' : `gate.${result.gate}`);
+      const saved = this.save(result, repair ? 'gate.failed_repair_queued' : `gate.${result.gate}`);
+      if (!reasons.length && result.autonomy?.integration === 'on-gate-pass') {
+        return this.saveAutomatic(saved, { id: randomUUID(), runId: id, inputDigest: result.order.inputDigest,
+          candidateId: result.candidate!.artifactId!, state: 'pending' }, 'automatic.integration_queued');
+      }
+      return saved;
     });
   }
   recordScopeCheck(id: string, check: ScopeCheck): void {

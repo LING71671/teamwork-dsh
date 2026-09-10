@@ -34,6 +34,7 @@ export class Runtime {
   private activeIntegration: { id: string; abort: AbortController; done: Promise<void> } | undefined;
   private readonly preparation = new Set<Promise<unknown>>();
   private readonly shutdown = new AbortController();
+  private automaticPreparation: Promise<void> | undefined;
   constructor(readonly store: Store, private readonly executor: Executor, private readonly options: RuntimeOptions) {
     if (options.integration?.enabled && !options.verification) throw new Fault('CONFIG_INVALID', 'Integration requires verification commands');
   }
@@ -54,6 +55,7 @@ export class Runtime {
   }
   start(input: StartCommand): Run {
     if (this.closing) throw new Fault('UNAVAILABLE', 'Runtime is shutting down or an owned process is unconfirmed', 503);
+    if (input.autonomy && (!this.integrationEnabled || !this.verificationEnabled || !input.spec)) throw new Fault('AUTONOMY_NOT_AVAILABLE', 'Automatic integration requires operator-enabled integration/verification and an explicit write scope', 422);
     if (this.integrationEnabled && !this.activeIntegration && !this.store.integrations.pending().length && this.store.integrations.unresolved()) {
       throw new Fault('INTEGRATION_RECONCILIATION_REQUIRED', 'Resolve the retained integration before starting more work');
     }
@@ -68,7 +70,7 @@ export class Runtime {
   }
   control(id: string, input: Exclude<ControlCommand, ReviseCommand>): Run {
     if (input.type === 'budget') return this.store.increaseBudget(id, input);
-    if (this.store.get(id).integration && input.type === 'cancel') {
+    if (this.store.get(id).integration && ['cancel', 'pause'].includes(input.type)) {
       const integration = this.store.get(id).integration!;
       if (['prepared', 'applying', 'snapshotting', 'validating'].includes(integration.phase)) {
         throw new Fault('INTEGRATION_CONTROL_REQUIRED', 'Cancel the integration using its own ID and revision');
@@ -89,6 +91,7 @@ export class Runtime {
   async revise(id: string, input: ReviseCommand, signal: AbortSignal): Promise<Run> {
     if (this.closing) throw new Fault('UNAVAILABLE', 'Runtime is shutting down or an owned process is unconfirmed', 503);
     const old = this.store.replayRevision(id, input); if (old) return old;
+    if (input.autonomy && (!this.integrationEnabled || !this.verificationEnabled)) throw new Fault('AUTONOMY_NOT_AVAILABLE', 'Automatic integration requires operator-enabled integration/verification', 422);
     if (this.activeIntegration) throw new Fault('INTEGRATION_BUSY', 'Wait for the integration writer to stop');
     const task = reviseRun(this.store, this.options.source, this.options.attemptsDirectory, id, input,
       AbortSignal.any([signal, this.shutdown.signal])).then(run => { queueMicrotask(() => this.pump()); return run; }).catch(error => {
@@ -183,6 +186,7 @@ export class Runtime {
   }
   private pump(): void {
     if (this.closing || !this.url) return;
+    if (this.automaticPreparation) return;
     if (this.activeIntegration) return;
     if (this.integrationEnabled) {
       const pending = this.store.integrations.pending()[0];
@@ -199,6 +203,18 @@ export class Runtime {
         return;
       }
       if (this.store.integrations.unresolved()) return;
+      const automatic = this.store.pendingAutomatic()[0];
+      if (automatic) {
+        if (this.active.size) return;
+        const done = Promise.resolve().then(() => this.prepareAutomatic(automatic.id)).catch(error => {
+          this.closing = true; throw error;
+        }).finally(() => {
+          this.automaticPreparation = undefined; this.pump();
+        });
+        this.automaticPreparation = done;
+        void done.catch(() => { this.closing = true; });
+        return;
+      }
     }
     for (const id of this.store.pending()) {
       if (this.active.size >= this.options.maxConcurrency) break;
@@ -211,6 +227,38 @@ export class Runtime {
       });
       this.active.set(id, { abort, done });
       void done.catch(() => { this.closing = true; });
+    }
+  }
+  private async prepareAutomatic(id: string): Promise<void> {
+    // Read-only preparation can be repeated after a crash. The stable, internal request receipt
+    // ensures a committed integration is reused rather than generating another write journal.
+    const signal = this.shutdown.signal;
+    for (let retry = 0; retry < 3; retry++) {
+      const intent = this.store.automatic(id);
+      if (signal.aborted || intent.state !== 'pending') return;
+      const run = this.store.get(intent.runId);
+      if (run.phase !== 'verified' || run.gate !== 'passed' || run.autonomy?.integration !== 'on-gate-pass' ||
+          run.order.inputDigest !== intent.inputDigest || run.candidate?.artifactId !== intent.candidateId || run.automaticIntegration?.id !== id) {
+        this.store.finishAutomatic(id, { reason: 'AUTOMATIC_AUTHORIZATION_STALE' }); return;
+      }
+      const request = { commandId: `automatic:${id}`, digest: digest(JSON.stringify(['automatic-integration', id, intent.runId, intent.inputDigest, intent.candidateId])) };
+      let integrationId: string;
+      try {
+        const existing = this.store.integrations.replay(request) ?? this.store.integrations.forRun(run.id).reverse().find(job =>
+          job.authorized && job.gateInputDigest === intent.inputDigest && job.candidate.artifactId === intent.candidateId);
+        if (existing) integrationId = existing.id;
+        else {
+          const plan = await integrationPreview(this.store, this.options.source, run.id, undefined, 0, 1, undefined, signal);
+          integrationId = (await new IntegrationEngine(this.store, this.options.source).prepare(run.id, plan.revision, plan.id, signal, request)).id;
+        }
+      } catch (error) {
+        if (signal.aborted || this.store.automatic(id).state !== 'pending') return;
+        if (retry < 2 && error instanceof Fault && ['REVISION_CONFLICT', 'INTEGRATION_PLAN_STALE'].includes(error.code)) continue;
+        this.store.finishAutomatic(id, { reason: error instanceof Fault ? error.code : 'AUTOMATIC_PREPARATION_FAILED' }); return;
+      }
+      // Bookkeeping failure after the write journal commits is not a preparation refusal.
+      // Leave the durable intent/receipt recoverable and stop scheduling until reopen.
+      this.store.finishAutomatic(id, { integrationId }); return;
     }
   }
   private async execute(run: Run, token: string, abort: AbortController): Promise<void> {
@@ -372,6 +420,7 @@ export class Runtime {
       active.abort.abort();
     }
     await Promise.allSettled([...this.preparation]);
+    await this.automaticPreparation;
     await Promise.all([...this.active.values()].map(a => a.done).concat(this.activeIntegration ? [this.activeIntegration.done] : []));
   }
 }

@@ -18,6 +18,13 @@ export type RunSpec = z.infer<typeof runSpecSchema>;
 export type WriteScope = RunSpec['writeScope'];
 export interface ScopeCheck { inputDigest: string; baselineDigest: string; candidateDigest: string; violations: string[] }
 export const modelBudgetSchema = z.object({ maxModelAttempts: z.number().int().min(0).max(1000) }).strict();
+export const autonomySchema = z.object({ integration: z.literal('on-gate-pass') }).strict();
+export type AutonomyPolicy = z.infer<typeof autonomySchema>;
+export interface AutomaticIntegration {
+  id: string; runId: string; inputDigest: string; candidateId: string;
+  state: 'pending' | 'paused' | 'cancelled' | 'scheduled' | 'failed';
+  integrationId?: string; reason?: string;
+}
 export interface ModelBudgetStatus {
   rootRunId: string; revision: number; maxModelAttempts: number; reservedModelAttempts: number;
   lastIncrease?: { reason: string; at: string; previousMaxModelAttempts: number };
@@ -27,6 +34,7 @@ export const startSchema = z.object({
   objective: z.string().trim().min(1).max(32_000),
   spec: runSpecSchema.optional(),
   budget: modelBudgetSchema.optional(),
+  autonomy: autonomySchema.optional(),
 }).strict();
 export const cancelSchema = z.object({
   commandId: identifier,
@@ -36,7 +44,7 @@ export const cancelSchema = z.object({
 export const pauseSchema = cancelSchema.extend({ type: z.literal('pause'), mode: z.enum(['drain', 'interrupt']).default('drain') });
 export const resumeSchema = cancelSchema.extend({ type: z.literal('resume') });
 export const reviseSchema = cancelSchema.extend({ type: z.literal('revise'), objective: z.string().trim().min(1).max(32_000),
-  spec: runSpecSchema, reason: z.string().trim().min(1).max(2000) });
+  spec: runSpecSchema, reason: z.string().trim().min(1).max(2000), autonomy: autonomySchema.optional() });
 export const budgetCommandSchema = cancelSchema.extend({ type: z.literal('budget'), expectedBudgetRevision: z.number().int().nonnegative(),
   maxModelAttempts: modelBudgetSchema.shape.maxModelAttempts, reason: z.string().trim().min(1).max(2000) });
 export type BudgetCommand = z.infer<typeof budgetCommandSchema>;
@@ -238,6 +246,8 @@ export interface Run {
   supersededBy?: { runId: string; specRevision: number };
   specHistory?: { reason: string; at: string; previous: Omit<Run, 'specHistory'> }[];
   budget?: ModelBudgetStatus;
+  autonomy?: AutonomyPolicy;
+  automaticIntegration?: AutomaticIntegration;
 }
 export interface Event {
   cursor: number;

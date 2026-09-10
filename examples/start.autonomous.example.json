@@ -1,0 +1,10 @@
+{
+  "commandId": "autonomous-fix-001",
+  "objective": "Implement the agreed change, obtain independent review and acceptance, then integrate the verified result within the specified scope.",
+  "spec": {
+    "requirements": [{ "id": "correctness", "text": "Implement the agreed behavior and provide regression coverage." }],
+    "writeScope": { "files": [], "trees": ["."] }
+  },
+  "budget": { "maxModelAttempts": 200 },
+  "autonomy": { "integration": "on-gate-pass" }
+}

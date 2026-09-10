@@ -23,6 +23,9 @@ test('host registers with real Cordis tools; reload removes old tools and never 
     assert.equal(f.store.all().length, 0);
     assert.deepEqual(ctx.tools.schemas().map(s => s.name).sort(), ['teamwork_control', 'teamwork_inspect', 'teamwork_integrate', 'teamwork_start', 'teamwork_status']);
     const spec = { requirements: [{ id: 'fix', text: 'Fix hello.txt' }], writeScope: { files: ['hello.txt'], trees: [] } };
+    const unauthorizedAuto = await ctx.tools.execute({ callId: 'auto-disabled' as ToolExecutionInput['callId'], name: 'teamwork_start',
+      arguments: { commandId: 'auto-disabled', objective: 'Fix', spec, autonomy: { integration: 'on-gate-pass' } }, signal: new AbortController().signal });
+    assert.equal(unauthorizedAuto.isError, true); assert.equal(f.store.all().length, 0);
     const result = await ctx.tools.execute({ callId: 'host-call' as ToolExecutionInput['callId'],
       name: 'teamwork_start', arguments: { commandId: 'start', objective: 'fix', spec, budget: { maxModelAttempts: 10 } }, signal: new AbortController().signal });
     assert.equal(result.isError, false, JSON.stringify(result));

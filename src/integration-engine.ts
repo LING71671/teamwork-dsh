@@ -48,8 +48,8 @@ function same(a: TreeEntry | undefined, b: TreeEntry | undefined): boolean {
   return a.kind === 'directory' ? b.kind === 'directory' : b.kind === 'file' && a.digest === b.digest && a.size === b.size && a.executable === b.executable;
 }
 
-/** Explicit prepare is the only entry;
- * it requires a verified Run and a current preview ID. Nothing dispatches on plugin load. */
+/** Preparation requires a verified Run and current preview ID. Authorization is either an
+ * explicit integration command or a durable automatic intent from the accepted upfront policy. */
 export class IntegrationEngine {
   constructor(private readonly store: Store, private readonly source: string) {}
 

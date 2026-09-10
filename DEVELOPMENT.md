@@ -16,7 +16,7 @@ npm ci --registry=https://registry.npmjs.org
 npm test
 ```
 
-目前有 178 项自动化测试。真实 DSH 测试覆盖单实现者、完整评审/Gate、结构化需求逐项评审、四进程需求修订与失败修复链，以及“checkpoint → 中断并确认退出 → 新实现者 → 新评审 → 验收”三进程恢复链；离线 LLM adapter 调用真实工具，不发送网络模型请求、不需要 API key。显式集成测试进一步将真实 DSH 的候选写回临时项目，保留期间新增的用户文件并重新验收；冲突链覆盖读取三方内容、产生新候选、独立评审、再次显式集成。其他测试覆盖去重、身份/版本拒绝、候选和上下文篡改、读取凭证撤销、失败/超时/输入改写、暂停竞态、重载、产物权限与分页、三方冲突、SQLite 恢复、真实子进程退出边界、取消、保留当前文件、需求修订与后代失效、历史基线、新工作项事务回滚、越界变更与漏评/重复需求 ID。这不等同于真实模型效果验收。
+目前有 195 项自动化测试。真实 DSH 测试覆盖单实现者、完整评审/Gate、结构化需求逐项评审、四进程需求修订与失败修复链，以及“checkpoint → 中断并确认退出 → 新实现者 → 新评审 → 验收”三进程恢复链；离线 LLM adapter 调用真实工具，不发送网络模型请求、不需要 API key。显式集成测试进一步将真实 DSH 的候选写回临时项目，保留期间新增的用户文件并重新验收；冲突链覆盖读取三方内容、产生新候选、独立评审、再次显式集成。其他测试覆盖去重、身份/版本拒绝、候选和上下文篡改、读取凭证撤销、失败/超时/输入改写、暂停竞态、重载、产物权限与分页、三方冲突、SQLite 恢复、真实子进程退出边界、取消、保留当前文件、需求修订与后代失效、历史基线、新工作项事务回滚、越界变更与漏评/重复需求 ID。这不等同于真实模型效果验收。
 
 测试只使用临时 DSH_HOME，不修改用户 DSH profile。测试生成的临时副本和状态在结束后清理。
 
@@ -130,7 +130,7 @@ Runtime 在确认实现者停止、固定副本后，对比原基线与候选，
 
 `running/starting → stopping → cancelled` 只有在确认退出后完成。退出未知进入 `blocked`，不得假报取消成功。`idle` 没有 submit、执行失败或超时进入 `failed`。父任务需求修订后，已停止的派生工作进入 `superseded`，Gate 不再有效；这不是取消确认、修复完成或集成成功。
 
-结果代码留在状态返回的 `order.workspace` 中；开启验证时以 `candidate.workspace` / `candidate.digest` 标识被验收的候选。快照是逻辑上的内容冻结，不是 OS 不可写文件；Gate 前会重新校验，后续使用仍需检查摘要。不会自动复制回原项目。
+结果代码留在状态返回的 `order.workspace` 中；开启验证时以 `candidate.workspace` / `candidate.digest` 标识被验收的候选。快照是逻辑上的内容冻结，不是 OS 不可写文件；Gate 前会重新校验，后续使用仍需检查摘要。只有另行接受的自动写回策略或集成命令才能将候选写回原项目。
 
 ## HTTP 接口（开发协议 0.3）
 
@@ -186,7 +186,15 @@ worker 从进程环境绑定 epoch、inputDigest 和根 session ID，不允许�
 
 ### 启用与发起集成
 
-默认不启用集成。操作者在新数据目录的 Runtime 配置中加入 `"integration": {"enabled": true}`，且必须配置 verification。完整示例见 `examples/runtime.integration.example.json`。hello 返回 integrationEnabled；只有启用时才报告 integrate、integration-cancel、integration-keep-current、integration-resolve、resolution-context。配置启用只是允许显式命令，Gate 通过、插件加载和状态查询都不自动写回。
+默认不启用集成。操作者在新数据目录的 Runtime 配置中加入 `"integration": {"enabled": true}`，且必须配置 verification。完整示例见 `examples/runtime.integration.example.json`。hello 返回 integrationEnabled；启用时报告 integrate、integration-cancel、integration-keep-current、integration-resolve、resolution-context、automatic-integration。配置启用本身不等于用户授权，需接受创建时的自动策略或单次集成命令；插件加载和状态查询不是授权。
+
+一次授权自动写回：start 提供 `autonomy: {"integration":"on-gate-pass"}` 和明确的完整 spec（含 writeScope），如 `examples/start.autonomous.example.json`。Gate 通过时，将 automaticIntegration 意图与 Gate 事件放在同一事务中保存；Runtime 等活动 Attempt 退出，再自行生成当前三方预检和集成日志。之后自动串行写回、保留备份、验收最终合并树，无须用户或宿主再发 integrate。没有该字段仍是手动模式，不追认旧任务为自动写回。独立验收和写范围检查不会因授权方式不同而跳过。
+
+automaticIntegration.state 的 pending 表示等待派发或正在只读准备，scheduled 表示已关联 integrationId（不表示写回成功）；成功仍看 integration.phase=succeeded。paused/cancelled 表示意图被用户暂停/取消，failed 表示准备失败且 reason 有错误码。三方冲突记录为 integration.phase=conflict，不覆盖冲突文件；自动创建冲突修复工作项尚待实现。源/Run 的预检竞态最多重新扫描三次，仍不稳定则记录失败，不无限忙循环。
+
+意图尚未创建集成日志时，可对 verified Run 使用普通 pause/resume/cancel 控制自动写回，Run.phase 仍为 verified，暂停状态看 automaticIntegration.state；暂停不撤销已通过的候选验证。一旦有活动集成日志则使用该 integrationId 的取消接口。重启会继续已授权 pending 意图，并复用已持久提交的日志/回执；人工先发起了相同当前候选的集成也会被复用，不重复写回。日志已提交后的记账异常会停止调度并保留待恢复状态，不把它误报成“未接受写入”。
+
+revise 不继承旧自动写回授权；只有修订请求再次提供 autonomy 才授权新目标/范围的自动写回。旧版本及已停止后代的 pending/paused 意图在同一修订事务中取消。普通修复/恢复不扩大范围，保持原授权。显式冲突解决子任务继承父任务已有的自动写回策略，但创建该子任务的自动调度尚未实现。
 
 用户授权写回后，先调用 `teamwork_inspect`（kind integration）取得 planId，即预览返回的 id；再调用 `teamwork_integrate`，例如 `{"runId":"...","commandId":"integrate-001","type":"integrate","expectedRevision":42,"planId":"<64位摘要>"}`。expectedRevision 是最新 **Run revision**，不是预览计划 ID 或集成 revision。HTTP 对应 POST integrations，省略 body 内 runId。模型不能提供目标目录、修改验收命令或跳过 Gate。重复/并发请求以同 commandId 和完全相同内容得到持久回执；回执是接受时的状态，不是最新执行状态。
 
@@ -242,13 +250,13 @@ failed/blocked 集成必须先满足退出证据要求，并由用户显式完�
 
 新 Run 支持有限修复、暂停和恢复；排队后重启仍使用已冻结的 current，而不吸收后来的源项目改动。同一集成已有活动、paused、verified 或 blocked 的解决工作项时拒绝重复创建；只有上一个 failed/cancelled/rejected 后才能另行显式创建替代项。resolve 会启动新的模型工作并可能产生费用，不自动循环。
 
-新候选通过 Gate 后，必须针对**新 Run**重新预览并显式发起 integrate，最终合并树再验收通过才算该次集成成功。期间用户再次修改相同文件会产生新的冲突，需要新的明确决策。这不是自动文本合并、自动覆盖或备份还原功能。
+新候选通过 Gate 后，如果继承了已接受的自动写回策略则自动预检/集成；否则针对**新 Run**重新预览并显式发起 integrate。最终合并树再验收通过才算该次集成成功。期间用户再次修改相同文件会产生新的冲突；当前仍需创建解决工作项，后续要接入预算内的自动冲突修复调度。这不是无条件覆盖或备份还原功能。
 
 ## 恢复与边界
 
 ### 共享模型尝试次数预算
 
-最终目标是一次授权后自主运行数天，不是每个步骤都审批。当前模型尝试预算是可选的运行总额度：创建 Run 可提供 `budget: {"maxModelAttempts": 200}`，整数范围 0–1000；额度内的实现、评审、修复与派生工作无需逐次追加批准。0 用于先创建但不启动模型，省略保持旧行为（没有跨轮次总额度）。此计数不代替每需求版本的 maxIterations，也不计量会话内的 token、请求数或工具调用数。长期自主规划、按开始时授权自动写回、墙钟 deadline 和长时间恢复仍未完成，不能据此声称已经支持数天无人值守。
+最终目标是一次授权后自主运行数天，不是每个步骤都审批。当前模型尝试预算是可选的运行总额度：创建 Run 可提供 `budget: {"maxModelAttempts": 200}`，整数范围 0–1000；额度内的实现、评审、修复与派生工作无需逐次追加批准。0 用于先创建但不启动模型，省略保持旧行为（没有跨轮次总额度）。此计数不代替每需求版本的 maxIterations，也不计量会话内的 token、请求数或工具调用数。长期自主规划、自动冲突修复、墙钟 deadline 和长时间恢复仍未完成，不能据此声称已经支持数天无人值守。
 
 Runtime 在每次 executor.create 前，事务性写入 model_reservations、共享计数与事件。实现/评审、新恢复 Attempt、修复、需求修订、冲突解决后代均使用同一 budget.rootRunId。兄弟任务不能各自获得剩余额度。预留后启动失败、取消或退出未知仍保留计数，不猜测是否产生了费用、不自动退款或重派同一个 Attempt。
 
@@ -297,7 +305,7 @@ HTTP 使用 POST Run commands，省略 body 的 runId。必须处于未派发、
 
 修订实现者和全新评审者通过 teamwork_context 读取当前版本的登记参考：current 为新基线，base 为可用的旧基线，proposal 为可用的旧候选或暂停快照。没有或已经损坏的旧版本列在 revisionContext.unavailable，相应读取返回 CONTEXT_VERSION_MISSING，不会伪造内容；conflicts 返回 available=false 时不能推断无冲突。数据库和程序错误不降级为参考缺失，修订失败且不提交回执。旧参考只提供实现线索，不继承旧目标或扩大新范围。绑定后再发生参考篡改会阻止新 Gate。完全替换任务不要求把旧候选所有改动重新带入新版本。
 
-新版本需要全新提交、逐项评审与命令验收，通过后仍须针对新候选重新预览并显式集成。排队修订跨 SQLite 重启仍使用已冻结的 current，不重新抓取后来的源修改。修订会消耗新的模型工作，可能产生费用；跨版本总 Token/时间/费用预算、计划修订和更细的影响分析仍待实现。
+新版本需要全新提交、逐项评审与命令验收。修订请求明确续授 autonomy 时，通过后自动预检/集成；省略时不继承旧授权，改用显式集成。排队修订跨 SQLite 重启仍使用已冻结的 current，不重新抓取后来的源修改。修订会消耗新的模型工作，可能产生费用；跨版本总 Token/时间/费用预算、计划修订和更细的影响分析仍待实现。
 
 ### 暂停与手动恢复
 
