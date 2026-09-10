@@ -86,7 +86,9 @@ export async function serve(runtime: Runtime, token: string, port = 0): Promise<
     if (!equal(auth, token)) throw new Fault('UNAUTHORIZED', 'Invalid host credential', 401);
     if (req.method === 'GET' && url.pathname === '/v1/hello') {
       json(res, 200, { protocolVersion, features: ['start', 'status', 'cancel', 'pause', 'resume', 'revise', 'revision-context', 'checkpoint', 'submit', 'events', 'review-gate', 'structured-requirements', 'write-scope', 'bounded-repair', 'candidate-recovery', 'artifacts', 'changes', 'integration-preview', 'integration-status',
+        'model-attempt-budget', 'budget-increase',
         ...(runtime.integrationEnabled ? ['integrate', 'integration-cancel', 'integration-keep-current', 'integration-resolve', 'resolution-context'] : [])],
+        modelAttemptBudget: { enforcement: 'durable-pre-dispatch-reservation', sharedAcrossDescendants: true, tokenAccounting: false, monetaryAccounting: false },
         verificationEnabled: runtime.verificationEnabled,
         integrationEnabled: runtime.integrationEnabled,
         maxIterations: runtime.maxIterations,
@@ -154,7 +156,7 @@ export async function serve(runtime: Runtime, token: string, port = 0): Promise<
     const id = match[1]!;
     if (req.method === 'POST' && match[2] === 'commands') {
       const input = await body(req);
-      if (typeof input === 'object' && input !== null && 'type' in input && !['cancel', 'pause', 'resume', 'revise'].includes(String(input.type))) {
+      if (typeof input === 'object' && input !== null && 'type' in input && !['cancel', 'pause', 'resume', 'revise', 'budget'].includes(String(input.type))) {
         throw new Fault('CAPABILITY_MISSING', 'Unknown control command', 422);
       }
       const command = controlSchema.parse(input);

@@ -11,11 +11,11 @@ export function apply(ctx: Context): void {
   const client = clientFromEnvironment(false);
   // Registration only: a reload never starts work or owns the background Runtime.
   ctx.tools.register(tool('teamwork_start',
-    'Start a coding attempt in an independent workspace. Only call for user-authorized work. Optional spec contains requirements [{id,text}] and writeScope {files,trees}: exact file paths and literal directory subtrees ("." means the ordinary project), not globs; empty lists prohibit changes. Preserve the user-authorized scope, never widen it on your own. Without spec, requirements are empty and scope is the ordinary project. Reuse commandId on network retries. Returns immediately; submitted is NOT verified success.',
+    'Start a coding attempt in an independent workspace. Only call for user-authorized work. Optional budget {maxModelAttempts} limits total implementation/review launches shared across repairs, resumes, specification revisions and descendants; zero pauses before the first launch, omission has no aggregate model-attempt limit. This is not token/cost accounting. Optional spec contains requirements [{id,text}] and writeScope {files,trees}: exact file paths and literal directory subtrees ("." means the ordinary project), not globs; empty lists prohibit changes. Preserve the user-authorized scope and budget, never widen them on your own. Without spec, requirements are empty and scope is the ordinary project. Reuse commandId on network retries. Returns immediately; submitted is NOT verified success.',
     object({ commandId: string, objective: string, spec: object({
       requirements: { type: 'array', items: object({ id: string, text: string }) },
       writeScope: object({ files: { type: 'array', items: string }, trees: { type: 'array', items: string } }),
-    }) }, ['commandId', 'objective']), async (args, exec) => {
+    }), budget: object({ maxModelAttempts: { type: 'integer' } }) }, ['commandId', 'objective']), async (args, exec) => {
       await client.hello(exec.signal);
       return client.start(startSchema.parse(args), exec.signal);
     }));
@@ -41,8 +41,9 @@ export function apply(ctx: Context): void {
       if (command.type === 'abandon') return client.abandonIntegration(runId, integrationId, command, exec.signal);
       return client.cancelIntegration(runId, integrationId, command, exec.signal);
     }));
-  ctx.tools.register(tool('teamwork_control', 'Pause, resume, cancel or explicitly revise user-authorized work. Supply current RUN revision. Pause drain waits; interrupt stops; neither acceptance means exit proof. Resume only when paused. Revise requires a full replacement objective/spec and reason: pause/stop active work and descendants first; it invalidates old Gate and supersedes stopped descendants, snapshots the current project and starts new model work. This may incur cost. Never use revise merely to retry or silently widen authorization. It does not write back or change operator acceptance policy.',
-    object({ runId: string, commandId: string, expectedRevision: { type: 'integer' }, type: { type: 'string', enum: ['cancel', 'pause', 'resume', 'revise'] },
+  ctx.tools.register(tool('teamwork_control', 'Pause, resume, cancel, explicitly revise work or increase a shared model-attempt budget. Supply current RUN revision. Budget requires an explicit user allocation, the budget root runId, expectedBudgetRevision, new total maxModelAttempts and reason; never auto-approve extra cost. Allocation does not resume work; follow with a separately authorized resume. Pause drain waits; interrupt stops; neither acceptance means exit proof. Resume only when paused with remaining budget. Revise requires a full replacement objective/spec and reason: pause/stop active work and descendants first; it invalidates old Gate and supersedes stopped descendants, snapshots the current project and starts new model work. It retains consumed budget. This may incur cost. Never use revise merely to retry or silently widen authorization. It does not write back or change operator acceptance policy.',
+    object({ runId: string, commandId: string, expectedRevision: { type: 'integer' }, type: { type: 'string', enum: ['cancel', 'pause', 'resume', 'revise', 'budget'] },
+      expectedBudgetRevision: { type: 'integer' }, maxModelAttempts: { type: 'integer' },
       mode: { type: 'string', enum: ['drain', 'interrupt'] }, objective: string, reason: string,
       spec: object({ requirements: { type: 'array', items: object({ id: string, text: string }) },
         writeScope: object({ files: { type: 'array', items: string }, trees: { type: 'array', items: string } }) }),

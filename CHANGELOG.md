@@ -28,7 +28,8 @@
 - Revision requires stopped/undispatched work and no unresolved integration writer. Stopped descendants are atomically marked superseded; active/unknown descendants block revision. Old integration jobs cannot create resolution work from a new spec's Gate.
 - Scoped revision references expose only registered available prior base/proposal and frozen current content. Missing/damaged old references are explicitly unavailable; subsequent tampering blocks new validation. Historical artifact changes/previews use the original version's baseline.
 - Legacy artifact metadata resolves its baseline through archived attempt identities; untraceable evidence is rejected. Artifact registry failures abort revision without a receipt instead of being silently downgraded to missing references.
-- 168 tests locally, including actual DSH revision → reference tools → independent per-requirement review → explicit integration, plus transitive invalidation, stale credentials/Gate, narrowed scope, rollback, history-aware inspection and queued SQLite recovery. Not part of v0.2.0-dev.1.
+- Optional shared model-attempt budget through DSH/HTTP. SQLite reserves before executor creation; implementation/review, repair/resume, spec revisions and resolution descendants consume the same root allocation automatically. Exhaustion pauses; unknown/failed launches retain reservations. Root-only exception allocations use a separate budget revision and do not implicitly resume stopped work. This is not token/money/wall-clock accounting or a per-step approval requirement.
+- 178 tests locally, including actual DSH revision → reference tools → independent per-requirement review → explicit integration, plus transitive invalidation, stale credentials/Gate, narrowed scope, rollback, history-aware inspection and queued SQLite recovery. Not part of v0.2.0-dev.1.
 
 ## 0.2.0-dev.1 — 2026-09-08
 

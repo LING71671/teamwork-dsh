@@ -16,7 +16,7 @@ npm ci --registry=https://registry.npmjs.org
 npm test
 ```
 
-目前有 168 项自动化测试。真实 DSH 测试覆盖单实现者、完整评审/Gate、结构化需求逐项评审、四进程需求修订与失败修复链，以及“checkpoint → 中断并确认退出 → 新实现者 → 新评审 → 验收”三进程恢复链；离线 LLM adapter 调用真实工具，不发送网络模型请求、不需要 API key。显式集成测试进一步将真实 DSH 的候选写回临时项目，保留期间新增的用户文件并重新验收；冲突链覆盖读取三方内容、产生新候选、独立评审、再次显式集成。其他测试覆盖去重、身份/版本拒绝、候选和上下文篡改、读取凭证撤销、失败/超时/输入改写、暂停竞态、重载、产物权限与分页、三方冲突、SQLite 恢复、真实子进程退出边界、取消、保留当前文件、需求修订与后代失效、历史基线、新工作项事务回滚、越界变更与漏评/重复需求 ID。这不等同于真实模型效果验收。
+目前有 178 项自动化测试。真实 DSH 测试覆盖单实现者、完整评审/Gate、结构化需求逐项评审、四进程需求修订与失败修复链，以及“checkpoint → 中断并确认退出 → 新实现者 → 新评审 → 验收”三进程恢复链；离线 LLM adapter 调用真实工具，不发送网络模型请求、不需要 API key。显式集成测试进一步将真实 DSH 的候选写回临时项目，保留期间新增的用户文件并重新验收；冲突链覆盖读取三方内容、产生新候选、独立评审、再次显式集成。其他测试覆盖去重、身份/版本拒绝、候选和上下文篡改、读取凭证撤销、失败/超时/输入改写、暂停竞态、重载、产物权限与分页、三方冲突、SQLite 恢复、真实子进程退出边界、取消、保留当前文件、需求修订与后代失效、历史基线、新工作项事务回滚、越界变更与漏评/重复需求 ID。这不等同于真实模型效果验收。
 
 测试只使用临时 DSH_HOME，不修改用户 DSH profile。测试生成的临时副本和状态在结束后清理。
 
@@ -59,13 +59,13 @@ Runtime 输出 loopback 地址和 `connection.json` 路径，不输出令牌。�
 
 ## 有限次数修复（协议 0.3）
 
-在 Runtime 配置的 `verification` 中显式设置 `"maxIterations": 2` 可启用修复；范围为 1–5，包含第一轮，不设置等同于 1。该限制适用于每个需求版本；用户显式修订需求后开始新版本的轮次，跨版本总预算仍待实现。该配置仅由操作者决定，host/worker 工具不能修改上限。示例见 `examples/runtime.repair.example.json`。每轮会启动实现者和全新评审者，可能增加模型费用。
+在 Runtime 配置的 `verification` 中显式设置 `"maxIterations": 2` 可启用修复；范围为 1–5，包含第一轮，不设置等同于 1。该限制适用于每个需求版本；用户显式修订需求后开始新版本的轮次，跨版本与派生任务的模型尝试次数由下文的共享 budget 另行限制。该配置仅由操作者决定，host/worker 工具不能修改上限。示例见 `examples/runtime.repair.example.json`。每轮会启动实现者和全新评审者，可能增加模型费用。
 
 当实现报告不完整、评审否决或验收命令失败/超时时，且完整性与证据检查通过、仍有预算，Gate 将失败轮与新的 outbox 意图在同一事务中持久化，进入 `repair_queued`。随后为相同 WorkItem 创建全新 Attempt、dispatchKey、凭证和工作目录，epoch 增加，原始 objective/specRevision 不变。新工作副本来自上一轮候选，不来自原项目，也不携带验收生成物。
 
 状态中的 `iteration` 表示当前轮次，`history` 保留已归档失败轮的候选摘要、实现报告、评审、验收输出与 Gate 原因。修复 worker 收到最多 16,000 字符的未信任诊断文本；新评审者不继承修复反馈。所有旧轮的新提交均被拒绝，历史幂等 receipt 重放不会改写新轮。
 
-候选/评审/验收输入被篡改、验收程序无法启动、证据陈旧或不完整、进程退出未知时，不会自动修复。预算耗尽以 `rejected` 结束。待派发修复可以取消；重启时未 claim 的修复 outbox 可恢复，已 claim 的修复仍保守隔离为 `blocked`。原项目保持不变。
+候选/评审/验收输入被篡改、验收程序无法启动、证据陈旧或不完整、进程退出未知时，不会自动修复。修复轮数耗尽以 `rejected` 结束；独立的共享模型尝试次数额度耗尽则进入 `paused`，reason 为 BUDGET_EXHAUSTED。待派发修复可以取消；重启时未 claim 的修复 outbox 可恢复，已 claim 的修复仍保守隔离为 `blocked`。原项目保持不变。
 
 ## 在 DSH 中加载 host 插件
 
@@ -84,7 +84,7 @@ dsh --profile web --patch C:\work\teamwork-dsh\examples\host.cordis.patch.yml
 |---|---|
 | `teamwork_start` | `commandId`、`objective`，可选 `spec: {requirements, writeScope}` |
 | `teamwork_status` | `runId` |
-| `teamwork_control` | `runId`、`commandId`、`expectedRevision`、`type: "cancel" / "pause" / "resume" / "revise"`；pause 可带 `mode`；revise 必须有完整 `objective`、`spec`、`reason` |
+| `teamwork_control` | `runId`、`commandId`、`expectedRevision`、`type: "cancel" / "pause" / "resume" / "revise" / "budget"`；budget 需新总上限、expectedBudgetRevision 和 reason；pause 可带 `mode`；revise 必须有完整 `objective`、`spec`、`reason` |
 | `teamwork_inspect` | `runId`、`kind: "artifacts" / "manifest" / "file" / "changes" / "integration" / "integrations"`，其他字段见下节 |
 | `teamwork_integrate` | `runId`、`commandId`、`expectedRevision`、`type: "integrate" / "cancel" / "abandon" / "resolve"`，计划/集成 ID 与决策字段见集成章节 |
 
@@ -145,7 +145,7 @@ host 与 Runtime 应一起更新；hello 会报告 `verificationEnabled`、`maxI
 | `GET /v1/hello` | host；协议与实际能力 |
 | `POST /v1/runs` | host；异步创建 |
 | `GET /v1/runs/{runId}` | host；最新状态 |
-| `POST /v1/runs/{runId}/commands` | host；cancel / pause / resume / revise |
+| `POST /v1/runs/{runId}/commands` | host；cancel / pause / resume / revise / budget |
 | `GET /v1/runs/{runId}/events?after={cursor}` | host；SSE 补读，事件 ID 是持久游标 |
 | `GET /v1/runs/{runId}/artifacts` | host；分页列出已登记的基线、候选与暂停快照 |
 | `GET /v1/runs/{runId}/artifacts/{artifactId}` | host；核对树摘要并分页列出文件/目录 |
@@ -245,6 +245,30 @@ failed/blocked 集成必须先满足退出证据要求，并由用户显式完�
 新候选通过 Gate 后，必须针对**新 Run**重新预览并显式发起 integrate，最终合并树再验收通过才算该次集成成功。期间用户再次修改相同文件会产生新的冲突，需要新的明确决策。这不是自动文本合并、自动覆盖或备份还原功能。
 
 ## 恢复与边界
+
+### 共享模型尝试次数预算
+
+最终目标是一次授权后自主运行数天，不是每个步骤都审批。当前模型尝试预算是可选的运行总额度：创建 Run 可提供 `budget: {"maxModelAttempts": 200}`，整数范围 0–1000；额度内的实现、评审、修复与派生工作无需逐次追加批准。0 用于先创建但不启动模型，省略保持旧行为（没有跨轮次总额度）。此计数不代替每需求版本的 maxIterations，也不计量会话内的 token、请求数或工具调用数。长期自主规划、按开始时授权自动写回、墙钟 deadline 和长时间恢复仍未完成，不能据此声称已经支持数天无人值守。
+
+Runtime 在每次 executor.create 前，事务性写入 model_reservations、共享计数与事件。实现/评审、新恢复 Attempt、修复、需求修订、冲突解决后代均使用同一 budget.rootRunId。兄弟任务不能各自获得剩余额度。预留后启动失败、取消或退出未知仍保留计数，不猜测是否产生了费用、不自动退款或重派同一个 Attempt。
+
+额度不足时不启动该执行器，保留工作/候选并进入 paused，reason 为 BUDGET_EXHAUSTED。这属于超出初始资源授权的例外决策。用户追加后，可在根 Run 调用 teamwork_control：
+
+```json
+{
+  "runId": "<budget.rootRunId>",
+  "commandId": "allocate-002",
+  "type": "budget",
+  "expectedRevision": 42,
+  "expectedBudgetRevision": 200,
+  "maxModelAttempts": 300,
+  "reason": "用户批准增加运行的总尝试额度"
+}
+```
+
+两个 revision 必须使用最新查询值。maxModelAttempts 是新的总上限而非增量，必须大于旧上限；budget.revision 随共享预留和追加独立递增。追加原因保存在持久回执与 budget.lastIncrease，同 commandId/内容重放原回执。子任务只能通过预算根 Run 追加；worker 凭证没有分配权限。分配不会隐式恢复用户已暂停的任务，随后可对需要继续的 paused Run 显式 resume。未知进程仍为 blocked，增加预算不会解除隔离。status.budget 总是读共享账本，历史命令回执是接受时的快照。
+
+hello 报告 model-attempt-budget / budget-increase，以及 modelAttemptBudget 的实际计量边界。Token/金额预算、跨 Run 墙钟 deadline、操作者级资源硬上限仍待实现。额度不足不会自动更换模型或付费提供者。文件集成及其验收命令不消耗模型尝试名额，也不因此获得新的写回授权。
 
 ### 显式需求修订
 

@@ -24,7 +24,7 @@ test('host registers with real Cordis tools; reload removes old tools and never 
     assert.deepEqual(ctx.tools.schemas().map(s => s.name).sort(), ['teamwork_control', 'teamwork_inspect', 'teamwork_integrate', 'teamwork_start', 'teamwork_status']);
     const spec = { requirements: [{ id: 'fix', text: 'Fix hello.txt' }], writeScope: { files: ['hello.txt'], trees: [] } };
     const result = await ctx.tools.execute({ callId: 'host-call' as ToolExecutionInput['callId'],
-      name: 'teamwork_start', arguments: { commandId: 'start', objective: 'fix', spec }, signal: new AbortController().signal });
+      name: 'teamwork_start', arguments: { commandId: 'start', objective: 'fix', spec, budget: { maxModelAttempts: 10 } }, signal: new AbortController().signal });
     assert.equal(result.isError, false, JSON.stringify(result));
     const run = f.store.all()[0]!;
     assert.deepEqual(run.order.spec, spec);
@@ -37,6 +37,12 @@ test('host registers with real Cordis tools; reload removes old tools and never 
       name: 'teamwork_status', arguments: { runId: run.id }, signal: new AbortController().signal });
     assert.equal(status.isError, false, JSON.stringify(status));
     await waitFor(() => f.store.get(run.id).phase === 'running' ? true : undefined);
+    const current = f.store.get(run.id);
+    assert.equal(current.budget?.reservedModelAttempts, 1);
+    const allocate = await ctx.tools.execute({ callId: 'allocate-call' as ToolExecutionInput['callId'], name: 'teamwork_control',
+      arguments: { runId: run.id, commandId: 'allocate', type: 'budget', expectedRevision: current.revision,
+        expectedBudgetRevision: current.budget!.revision, maxModelAttempts: 12, reason: 'User approved a larger total allocation' }, signal: new AbortController().signal });
+    assert.equal(allocate.isError, false, JSON.stringify(allocate)); assert.equal(f.store.get(run.id).budget?.maxModelAttempts, 12);
     const pause = await ctx.tools.execute({ callId: 'pause-call' as ToolExecutionInput['callId'], name: 'teamwork_control',
       arguments: { runId: run.id, commandId: 'pause', type: 'pause', mode: 'interrupt', expectedRevision: f.store.get(run.id).revision }, signal: new AbortController().signal });
     assert.equal(pause.isError, false, JSON.stringify(pause));

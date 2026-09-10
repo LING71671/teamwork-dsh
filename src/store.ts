@@ -4,7 +4,8 @@ import { join, dirname } from 'node:path';
 import { Fault, terminal, type Run, type Event, type StartCommand, type CancelCommand,
   type BridgeCommand, type Phase, type VerificationPolicy, type Candidate, type WorkOrder, type ValidationResult,
   type PauseCommand, type ResumeCommand, type PauseContinuation, type RoundEvidence, type ArtifactDescriptor, type ResolveIntegrationCommand,
-  type ResolutionContext, type RevisionContext, type ReviseCommand, type ScopeCheck, startSchema, reviseSchema } from './contracts.js';
+  type ResolutionContext, type RevisionContext, type ReviseCommand, type ScopeCheck, type BudgetCommand, type ModelBudgetStatus,
+  startSchema, reviseSchema, budgetCommandSchema } from './contracts.js';
 import { activityPhase, evaluateGate, receive, transition, repairEligible, repairFeedback } from './kernel.js';
 import { IntegrationJournal, integrationStatus } from './integration-journal.js';
 
@@ -36,6 +37,8 @@ export class Store {
       CREATE TABLE IF NOT EXISTS credentials (attempt_id TEXT PRIMARY KEY, run_id TEXT NOT NULL, hash TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS artifacts (id TEXT PRIMARY KEY, run_id TEXT NOT NULL, data TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS artifacts_by_run ON artifacts(run_id, id);
+      CREATE TABLE IF NOT EXISTS model_budgets (root_run_id TEXT PRIMARY KEY, data TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS model_reservations (attempt_id TEXT PRIMARY KEY, root_run_id TEXT NOT NULL, run_id TEXT NOT NULL, role TEXT NOT NULL, at TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS events (cursor INTEGER PRIMARY KEY AUTOINCREMENT,
         run_id TEXT NOT NULL, revision INTEGER NOT NULL, type TEXT NOT NULL, at TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS events_by_run ON events(run_id, cursor);`);
@@ -79,16 +82,57 @@ export class Store {
   get(id: string): Run {
     const row = this.db.prepare('SELECT data FROM runs WHERE id=?').get(id);
     if (!row) throw new Fault('NOT_FOUND', 'Run does not exist', 404);
-    return JSON.parse(row.data as string) as Run;
+    const run = JSON.parse(row.data as string) as Run;
+    if (run.budget) run.budget = this.modelBudget(run.budget.rootRunId);
+    return run;
   }
   all(): Run[] {
-    return this.db.prepare('SELECT data FROM runs').all().map(r => JSON.parse(r.data as string) as Run);
+    return this.db.prepare('SELECT id FROM runs').all().map(r => this.get(r.id as string));
   }
   private save(run: Run, type: string): Run {
     this.db.prepare('INSERT OR REPLACE INTO runs VALUES(?,?)').run(run.id, JSON.stringify(run));
     this.db.prepare('INSERT INTO events(run_id,revision,type,at) VALUES(?,?,?,?)')
       .run(run.id, run.revision, type, run.updatedAt);
     return run;
+  }
+  private modelBudget(rootRunId: string): ModelBudgetStatus {
+    const row = this.db.prepare('SELECT data FROM model_budgets WHERE root_run_id=?').get(rootRunId);
+    if (!row) throw new Fault('BUDGET_MISSING', 'Budget ledger is missing; dispatch is not authorized');
+    return JSON.parse(row.data as string) as ModelBudgetStatus;
+  }
+  /** Reservation precedes executor creation. Failed/unknown dispatch is conservatively charged, never refunded. */
+  reserveModelAttempt(id: string, attemptId: string): boolean {
+    return this.transaction(() => {
+      const run = this.get(id), review = run.reviewAttempt?.order.attemptId === attemptId;
+      if (run.phase !== (review ? 'reviewing' : 'running') || (!review && run.order.attemptId !== attemptId)) throw new Fault('RESULT_STALE', 'Only the current launch may reserve model budget');
+      if (!run.budget) return true;
+      if (this.db.prepare('SELECT 1 FROM model_reservations WHERE attempt_id=?').get(attemptId)) throw new Fault('DISPATCH_ALREADY_RESERVED', 'This attempt may already have launched; never dispatch twice');
+      const budget = run.budget, at = new Date().toISOString();
+      if (budget.reservedModelAttempts >= budget.maxModelAttempts) {
+        this.save({ ...run, phase: 'pausing', reason: 'BUDGET_EXHAUSTED', revision: run.revision + 1, updatedAt: at,
+          pause: { mode: 'interrupt', stage: run.phase } }, 'run.budget_exhausted');
+        return false;
+      }
+      const reserved = { ...budget, revision: budget.revision + 1, reservedModelAttempts: budget.reservedModelAttempts + 1 };
+      this.db.prepare('UPDATE model_budgets SET data=? WHERE root_run_id=?').run(JSON.stringify(reserved), budget.rootRunId);
+      this.db.prepare('INSERT INTO model_reservations VALUES(?,?,?,?,?)').run(attemptId, budget.rootRunId, id, review ? 'review' : 'implementation', at);
+      this.save({ ...run, budget: reserved, revision: run.revision + 1, updatedAt: at }, 'attempt.budget_reserved');
+      return true;
+    });
+  }
+  increaseBudget(id: string, input: BudgetCommand): Run {
+    input = budgetCommandSchema.parse(input);
+    return this.command(`host:${input.commandId}`, { id, input }, () => {
+      const run = this.get(id);
+      if (run.revision !== input.expectedRevision) throw new Fault('REVISION_CONFLICT', 'Run changed before budget authorization');
+      if (!run.budget || run.budget.rootRunId !== id) throw new Fault('BUDGET_ROOT_REQUIRED', 'Change the existing shared budget on its root Run only');
+      if (run.budget.revision !== input.expectedBudgetRevision) throw new Fault('BUDGET_REVISION_CONFLICT', 'Shared budget changed; inspect its current revision');
+      if (input.maxModelAttempts <= run.budget.maxModelAttempts) throw new Fault('BUDGET_NOT_INCREASED', 'An explicit allocation must increase the total limit');
+      const budget = { ...run.budget, maxModelAttempts: input.maxModelAttempts, revision: run.budget.revision + 1,
+        lastIncrease: { reason: input.reason, at: new Date().toISOString(), previousMaxModelAttempts: run.budget.maxModelAttempts } };
+      this.db.prepare('UPDATE model_budgets SET data=? WHERE root_run_id=?').run(JSON.stringify(budget), id);
+      return this.save({ ...run, budget, revision: run.revision + 1, updatedAt: new Date().toISOString() }, 'run.budget_increased');
+    });
   }
   private registerArtifact(run: Run, candidate: Candidate, kind: ArtifactDescriptor['kind']): Candidate {
     const id = digest(canonical({ runId: run.id, workspace: candidate.workspace, digest: candidate.digest }));
@@ -162,10 +206,12 @@ export class Store {
       const order = { runId: id, workItemId: randomUUID(), attemptId, dispatchKey: randomUUID(),
         epoch: 1, specRevision: 1, objective: input.objective, spec,
         inputDigest: digest(canonical({ objective: input.objective, spec, workspace, executionProfile,
-          ...(verification ? { verification } : {}) })),
+          ...(verification ? { verification } : {}), ...(input.budget ? { budget: input.budget } : {}) })),
         workspace: join(workspace, attemptId, 'work') };
       const run: Run = { id, revision: 0, phase: 'queued', gate: 'not_evaluated', order, iteration: 1, history: [], createdAt: at, updatedAt: at,
-        ...(verification ? { verification } : {}) };
+        ...(verification ? { verification } : {}), ...(input.budget ? { budget: { rootRunId: id, revision: 0,
+          maxModelAttempts: input.budget.maxModelAttempts, reservedModelAttempts: 0 } } : {}) };
+      if (run.budget) this.db.prepare('INSERT INTO model_budgets VALUES(?,?)').run(id, JSON.stringify(run.budget));
       this.save(run, 'run.created');
       this.db.prepare('INSERT INTO outbox VALUES(?,?)').run(id, 'pending');
       return run;
@@ -184,7 +230,7 @@ export class Store {
       if (context.parentRunId !== parentId || context.integrationId !== integrationId || context.planId !== input.planId) throw new Fault('RESOLUTION_IDENTITY', 'Resolution inputs do not match the command');
       const id = randomUUID(), attemptId = randomUUID(), at = new Date().toISOString();
       let run: Run = { id, revision: 0, phase: 'queued', gate: 'not_evaluated', iteration: 1, history: [], createdAt: at, updatedAt: at,
-        verification: parent.verification, parentRunId: parent.id,
+        verification: parent.verification, parentRunId: parent.id, ...(parent.budget ? { budget: parent.budget } : {}),
         order: { runId: id, workItemId: randomUUID(), attemptId, dispatchKey: randomUUID(), epoch: 1, specRevision: parent.order.specRevision + 1,
           objective: parent.order.objective, ...(parent.order.spec ? { spec: parent.order.spec } : {}),
           workspace: join(workspace, attemptId, 'work'), inputDigest: '', resolution: context } };
@@ -247,6 +293,7 @@ export class Store {
       const parentRunId = old.parentRunId ?? old.order.resolution?.parentRunId;
       let run: Run = { id, revision: old.revision + 1, phase: 'queued', gate: 'not_evaluated', iteration: 1, history: [],
         createdAt: old.createdAt, updatedAt: at,
+        ...(old.budget ? { budget: old.budget } : {}),
         ...(old.verification ? { verification: old.verification } : {}), ...(parentRunId ? { parentRunId } : {}),
         specHistory: [...(old.specHistory ?? []), { reason: input.reason, at, previous }],
         order: { runId: id, workItemId: old.order.workItemId, attemptId, dispatchKey: randomUUID(), epoch: old.order.epoch + 1,
@@ -350,6 +397,7 @@ export class Store {
       if (run.revision !== input.expectedRevision) throw new Fault('REVISION_CONFLICT', `Current revision is ${run.revision}`);
       if (run.phase !== 'paused' || !run.pause?.continuation) throw new Fault('NOT_PAUSED', 'Only a fully paused run may resume');
       const plan = run.pause.continuation;
+      if (plan.kind !== 'submitted' && run.budget && run.budget.reservedModelAttempts >= run.budget.maxModelAttempts) throw new Fault('BUDGET_EXHAUSTED', 'Authorize more budget on the root Run before resuming');
       let next = run;
       if (plan.kind === 'implementation' || plan.kind === 'verification') {
         const { report, checkpoint, candidate: _candidate, reviewAttempt: _review, validation: _validation,

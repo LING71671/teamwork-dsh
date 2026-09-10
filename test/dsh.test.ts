@@ -50,8 +50,18 @@ for (const verification of [false, true, 'repair', 'pause', 'resolution', 'revis
   }] } : undefined, verification === true || verification === 'resolution' || verification === 'revision');
   try {
     const run = await f.client.start({ commandId: 'real-dsh', objective: 'Exercise offline plugin integration', ...(verification === true ? {
+      budget: { maxModelAttempts: 1 },
       spec: { requirements: [{ id: 'readback', text: 'hello.txt must contain changed through real DSH tool' }], writeScope: { files: ['hello.txt'], trees: [] } },
     } : {}) });
+    if (verification === true) {
+      const stopped = await waitFor(() => { const r = f.store.get(run.id); return r.phase === 'paused' ? r : undefined; }, 25_000);
+      assert.equal(stopped.reason, 'BUDGET_EXHAUSTED'); assert.equal(launched, 1); assert.equal(exited, 1);
+      assert.equal(stopped.budget?.reservedModelAttempts, 1); assert.equal(stopped.gate, 'not_evaluated');
+      const allocated = await f.client.control(run.id, { commandId: 'allocate-review', type: 'budget', expectedRevision: stopped.revision,
+        expectedBudgetRevision: stopped.budget!.revision, maxModelAttempts: 2, reason: 'User authorized one independent review attempt' });
+      assert.equal(allocated.phase, 'paused'); assert.equal(launched, 1);
+      await f.client.control(run.id, { commandId: 'resume-review', type: 'resume', expectedRevision: allocated.revision });
+    }
     if (verification === 'pause') {
       await waitFor(() => f.store.get(run.id).checkpoint ? true : undefined, 25_000);
       await f.client.control(run.id, { commandId: 'pause', type: 'pause', mode: 'interrupt', expectedRevision: f.store.get(run.id).revision });
@@ -67,6 +77,7 @@ for (const verification of [false, true, 'repair', 'pause', 'resolution', 'revis
     assert.equal(settled.phase, verification ? 'verified' : 'submitted', diagnostic || JSON.stringify(settled));
     assert.equal(settled.gate, verification ? 'passed' : 'not_evaluated');
     assert.equal(launched, exited);
+    if (verification === true) assert.equal(settled.budget?.reservedModelAttempts, 2);
     assert.equal(launched, verification === 'pause' ? 3 : verification === 'repair' ? 4 : verification ? 2 : 1);
     if (verification) {
       assert.equal(captures.length, verification === 'repair' ? 4 : 2);

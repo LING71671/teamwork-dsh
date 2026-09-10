@@ -67,6 +67,7 @@ export class Runtime {
     return run;
   }
   control(id: string, input: Exclude<ControlCommand, ReviseCommand>): Run {
+    if (input.type === 'budget') return this.store.increaseBudget(id, input);
     if (this.store.get(id).integration && input.type === 'cancel') {
       const integration = this.store.get(id).integration!;
       if (['prepared', 'applying', 'snapshotting', 'validating'].includes(integration.phase)) {
@@ -239,6 +240,7 @@ export class Runtime {
       run = this.store.bindInput(run.id, inputTreeDigest);
       this.store.move(run.id, 'running');
       if (await this.pauseStopped(run.id, abort)) return;
+      if (!this.store.reserveModelAttempt(run.id, run.order.attemptId)) { await this.pauseStopped(run.id, abort); return; }
       await runOwned(this.executor.create(run.order, { url: this.url, token }), abort.signal, this.options.attemptTimeoutMs);
       implementationCompleted = true;
       const current = this.store.get(run.id);
@@ -331,6 +333,7 @@ export class Runtime {
     await snapshot(candidatePath, reviewOrder.workspace, signal, true);
     if (await treeDigest(reviewOrder.workspace, signal) !== hash) throw new Fault('CANDIDATE_CHANGED', 'Review input differs');
     if (await this.pauseStopped(run.id, abort)) return;
+    if (!this.store.reserveModelAttempt(run.id, reviewOrder.attemptId)) { await this.pauseStopped(run.id, abort); return; }
     await runOwned(this.executor.create(reviewOrder, { url: this.url, token }), signal, this.options.attemptTimeoutMs);
     const reviewed = this.store.get(run.id);
     if (!reviewed.reviewAttempt?.report) throw new Fault('REVIEW_MISSING', 'Reviewer did not submit a structured assessment');

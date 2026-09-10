@@ -17,10 +17,16 @@ export const runSpecSchema = z.object({
 export type RunSpec = z.infer<typeof runSpecSchema>;
 export type WriteScope = RunSpec['writeScope'];
 export interface ScopeCheck { inputDigest: string; baselineDigest: string; candidateDigest: string; violations: string[] }
+export const modelBudgetSchema = z.object({ maxModelAttempts: z.number().int().min(0).max(1000) }).strict();
+export interface ModelBudgetStatus {
+  rootRunId: string; revision: number; maxModelAttempts: number; reservedModelAttempts: number;
+  lastIncrease?: { reason: string; at: string; previousMaxModelAttempts: number };
+}
 export const startSchema = z.object({
   commandId: identifier,
   objective: z.string().trim().min(1).max(32_000),
   spec: runSpecSchema.optional(),
+  budget: modelBudgetSchema.optional(),
 }).strict();
 export const cancelSchema = z.object({
   commandId: identifier,
@@ -31,7 +37,10 @@ export const pauseSchema = cancelSchema.extend({ type: z.literal('pause'), mode:
 export const resumeSchema = cancelSchema.extend({ type: z.literal('resume') });
 export const reviseSchema = cancelSchema.extend({ type: z.literal('revise'), objective: z.string().trim().min(1).max(32_000),
   spec: runSpecSchema, reason: z.string().trim().min(1).max(2000) });
-export const controlSchema = z.discriminatedUnion('type', [cancelSchema, pauseSchema, resumeSchema, reviseSchema]);
+export const budgetCommandSchema = cancelSchema.extend({ type: z.literal('budget'), expectedBudgetRevision: z.number().int().nonnegative(),
+  maxModelAttempts: modelBudgetSchema.shape.maxModelAttempts, reason: z.string().trim().min(1).max(2000) });
+export type BudgetCommand = z.infer<typeof budgetCommandSchema>;
+export const controlSchema = z.discriminatedUnion('type', [cancelSchema, pauseSchema, resumeSchema, reviseSchema, budgetCommandSchema]);
 export const integrationPolicySchema = z.object({ enabled: z.boolean() }).strict();
 export const integrateSchema = cancelSchema.extend({ type: z.literal('integrate'), planId: z.string().regex(/^[a-f0-9]{64}$/) });
 export const abandonIntegrationSchema = cancelSchema.extend({ type: z.literal('abandon'), targetDigest: z.string().regex(/^[a-f0-9]{64}$/), reason: z.string().trim().min(1).max(2000) });
@@ -228,6 +237,7 @@ export interface Run {
   parentRunId?: string;
   supersededBy?: { runId: string; specRevision: number };
   specHistory?: { reason: string; at: string; previous: Omit<Run, 'specHistory'> }[];
+  budget?: ModelBudgetStatus;
 }
 export interface Event {
   cursor: number;

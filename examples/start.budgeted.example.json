@@ -1,0 +1,9 @@
+{
+  "commandId": "budgeted-fix-001",
+  "objective": "Fix the requested behavior and obtain independent review; stop when the allocated attempts are exhausted.",
+  "budget": { "maxModelAttempts": 200 },
+  "spec": {
+    "requirements": [{ "id": "correctness", "text": "Implement the requested behavior and cover it with tests." }],
+    "writeScope": { "files": [], "trees": ["."] }
+  }
+}
