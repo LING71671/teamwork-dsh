@@ -5,9 +5,9 @@ import { Fault, terminal, type Run, type Event, type StartCommand, type CancelCo
   type BridgeCommand, type Phase, type VerificationPolicy, type Candidate, type WorkOrder, type ValidationResult,
   type PauseCommand, type ResumeCommand, type PauseContinuation, type RoundEvidence, type ArtifactDescriptor, type ResolveIntegrationCommand,
   type ResolutionContext, type RevisionContext, type ReviseCommand, type ScopeCheck, type BudgetCommand, type ModelBudgetStatus,
-  type AutomaticIntegration, startSchema, reviseSchema, budgetCommandSchema } from './contracts.js';
+  type AutomaticIntegration, type ControlCommand, startSchema, reviseSchema, budgetCommandSchema } from './contracts.js';
 import { activityPhase, evaluateGate, receive, transition, repairEligible, repairFeedback } from './kernel.js';
-import { IntegrationJournal, integrationStatus } from './integration-journal.js';
+import { IntegrationJournal, integrationStatus, automaticResolutionRequest } from './integration-journal.js';
 
 export const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
 function canonical(value: unknown): string {
@@ -114,7 +114,7 @@ export class Store {
     this.db.prepare('INSERT OR REPLACE INTO automatic_integrations VALUES(?,?)').run(intent.id, JSON.stringify(intent));
     return this.save({ ...run, automaticIntegration: intent, revision: run.revision + 1, updatedAt: new Date().toISOString() }, type);
   }
-  finishAutomatic(id: string, result: { integrationId: string } | { reason: string }): void {
+  finishAutomatic(id: string, result: { integrationId: string; resolutionRunId?: string } | { reason: string }): void {
     this.transaction(() => {
       const intent = this.automatic(id), run = this.get(intent.runId);
       if (intent.state !== 'pending' || run.automaticIntegration?.id !== id) return;
@@ -241,10 +241,14 @@ export class Store {
     });
   }
   resolveIntegration(parentId: string, integrationId: string, input: ResolveIntegrationCommand, workspace: string,
-    executionProfile: unknown, context: ResolutionContext): Run {
+    executionProfile: unknown, context: ResolutionContext, automaticId?: string): Run {
     return this.integrations.resolve(parentId, integrationId, input, () => {
       const parent = this.get(parentId);
       const job = this.integrations.get(integrationId);
+      const automatic = automaticId ? this.automatic(automaticId) : undefined;
+      if (automatic && (automatic.state !== 'pending' || automatic.runId !== parentId || parent.automaticIntegration?.id !== automatic.id ||
+          automatic.inputDigest !== parent.order.inputDigest || automatic.candidateId !== parent.candidate?.artifactId ||
+          parent.autonomy?.conflicts !== 'resolve' || !parent.budget)) throw new Fault('AUTOMATIC_AUTHORIZATION_STALE', 'Automatic conflict resolution authorization changed');
       if (job.gateInputDigest !== parent.order.inputDigest || job.candidate.artifactId !== parent.candidate?.artifactId) throw new Fault('INTEGRATION_GATE_STALE', 'Integration no longer belongs to the current candidate');
       if (parent.phase !== 'verified' || parent.gate !== 'passed' || !parent.verification ||
         parent.candidate?.digest !== context.inputs.proposal.digest || parent.baseline?.digest !== context.inputs.base.digest) {
@@ -266,8 +270,9 @@ export class Store {
         inputDigest: digest(canonical({ parentInput: parent.order.inputDigest, resolution, executionProfile, verification: parent.verification })) } };
       this.save(run, 'run.resolution_created');
       this.db.prepare('INSERT INTO outbox VALUES(?,?)').run(id, 'pending');
+      if (automatic) this.saveAutomatic(parent, { ...automatic, state: 'scheduled', integrationId, resolutionRunId: id }, 'automatic.resolution_scheduled');
       return run;
-    });
+    }, automaticId ? automaticResolutionRequest(automaticId) : undefined);
   }
   contextScope(attemptId: string, token: string): { runId: string; context: ResolutionContext | RevisionContext } {
     const credential = this.db.prepare('SELECT run_id,hash FROM credentials WHERE attempt_id=?').get(attemptId);
@@ -281,6 +286,9 @@ export class Store {
     return { runId: run.id, context };
   }
   replayRevision(id: string, input: ReviseCommand): Run | undefined {
+    return this.replayControl(id, input);
+  }
+  replayControl(id: string, input: ControlCommand): Run | undefined {
     const row = this.db.prepare('SELECT digest,response FROM commands WHERE id=?').get(`host:${input.commandId}`);
     if (!row) return undefined;
     if (row.digest !== digest(canonical({ id, input }))) throw new Fault('IDEMPOTENCY_CONFLICT', 'Command ID reused with a different payload');

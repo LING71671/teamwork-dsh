@@ -15,11 +15,11 @@ test('SDK result rejects idle without turn/end, error and max-tokens outcomes', 
   }
 });
 
-for (const verification of [false, true, 'repair', 'pause', 'resolution', 'revision', 'automatic'] as const) test(`real DSH SDK + Cordis workers, offline provider, verification=${verification}`, { timeout: 90_000 }, async () => {
+for (const verification of [false, true, 'repair', 'pause', 'resolution', 'revision', 'automatic', 'automatic-resolution'] as const) test(`real DSH SDK + Cordis workers, offline provider, verification=${verification}`, { timeout: 90_000 }, async () => {
   const fixtureHome = await mkdtemp(join(tmpdir(), 'teamwork-dsh-integration-'));
   const patch = join(fixtureHome, 'offline.patch.yml');
   const provider = new URL('./fixtures/offline-provider.js', import.meta.url).href;
-  await writeFile(patch, `- insert:\n    - id: offline-test-provider\n      name: ${JSON.stringify(provider)}\n      inject: [llm]\n      config:\n        repairDemo: ${verification === 'repair'}\n        pauseDemo: ${verification === 'pause'}\n        resolutionDemo: ${verification === 'resolution'}\n        requirementDemo: ${verification === true}\n        revisionDemo: ${verification === 'revision'}\n`);
+  await writeFile(patch, `- insert:\n    - id: offline-test-provider\n      name: ${JSON.stringify(provider)}\n      inject: [llm]\n      config:\n        repairDemo: ${verification === 'repair'}\n        pauseDemo: ${verification === 'pause'}\n        resolutionDemo: ${verification === 'resolution' || verification === 'automatic-resolution'}\n        requirementDemo: ${verification === true}\n        revisionDemo: ${verification === 'revision'}\n`);
   const actualBin = fileURLToPath(new URL('../../node_modules/@deepseek-ai/dsh/lib/bin.js', import.meta.url));
   await verifyDsh(actualBin);
   let diagnostic = '';
@@ -44,19 +44,34 @@ for (const verification of [false, true, 'repair', 'pause', 'resolution', 'revis
     });
   const f = await setup(driver, 40_000, verification ? { maxIterations: verification === 'repair' ? 2 : 1, commands: [{
     id: 'readback', executable: process.execPath,
-    args: ['-e', verification === 'resolution' || verification === 'revision' ? "require('node:assert').ok(require('node:fs').readFileSync('hello.txt','utf8').startsWith('changed through real DSH tool'))"
+    args: ['-e', verification === 'resolution' || verification === 'revision' || verification === 'automatic-resolution' ? "require('node:assert').ok(require('node:fs').readFileSync('hello.txt','utf8').startsWith('changed through real DSH tool'))"
       : "require('node:assert').equal(require('node:fs').readFileSync('hello.txt','utf8'),'changed through real DSH tool')"],
     timeoutMs: 5_000,
-  }] } : undefined, verification === true || verification === 'resolution' || verification === 'revision' || verification === 'automatic');
+  }] } : undefined, verification === true || verification === 'resolution' || verification === 'revision' || verification === 'automatic' || verification === 'automatic-resolution');
   try {
     const run = await f.client.start({ commandId: 'real-dsh', objective: 'Exercise offline plugin integration', ...(verification === true ? {
       budget: { maxModelAttempts: 1 },
       spec: { requirements: [{ id: 'readback', text: 'hello.txt must contain changed through real DSH tool' }], writeScope: { files: ['hello.txt'], trees: [] } },
-    } : {}), ...(verification === 'automatic' ? {
-      autonomy: { integration: 'on-gate-pass' as const }, budget: { maxModelAttempts: 2 },
+    } : {}), ...(verification === 'automatic' || verification === 'automatic-resolution' ? {
+      autonomy: { integration: 'on-gate-pass' as const, ...(verification === 'automatic-resolution' ? { conflicts: 'resolve' as const } : {}) },
+      budget: { maxModelAttempts: verification === 'automatic-resolution' ? 4 : 2 },
       spec: { requirements: [], writeScope: { files: ['hello.txt'], trees: [] } },
     } : {}) });
     if (verification === 'automatic') await writeFile(join(f.source, 'concurrent-user-file'), 'preserved by integration');
+    if (verification === 'automatic-resolution') {
+      await waitFor(() => f.store.get(run.id).checkpoint ? true : undefined, 25_000);
+      await writeFile(join(f.source, 'hello.txt'), 'user edit'); await writeFile(join(f.source, 'user-only'), 'keep this');
+      const childId = await waitFor(() => f.store.get(run.id).automaticIntegration?.resolutionRunId, 30_000);
+      const completed = await waitFor(() => { const child = f.store.get(childId); return child.integration?.phase === 'succeeded' ? child : undefined; }, 40_000);
+      assert.equal(completed.gate, 'passed'); assert.equal(completed.budget?.reservedModelAttempts, 4);
+      assert.equal(launched, 4); assert.equal(exited, 4); assert.equal(captures.length, 4);
+      assert.equal(new Set(captures.map(c => c.sessionId)).size, 4);
+      assert.match(JSON.stringify(captures.slice(2).flatMap(c => c.events)), /teamwork_context/);
+      assert.match(JSON.stringify(captures.slice(2).flatMap(c => c.events)), /outside the managed attempt allowlist/);
+      assert.equal(await readFile(join(f.source, 'hello.txt'), 'utf8'), 'changed through real DSH tool + user edit');
+      assert.equal(await readFile(join(f.source, 'user-only'), 'utf8'), 'keep this');
+      assert.equal(f.store.all().length, 2); return;
+    }
     if (verification === true) {
       const stopped = await waitFor(() => { const r = f.store.get(run.id); return r.phase === 'paused' ? r : undefined; }, 25_000);
       assert.equal(stopped.reason, 'BUDGET_EXHAUSTED'); assert.equal(launched, 1); assert.equal(exited, 1);

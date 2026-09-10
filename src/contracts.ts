@@ -18,12 +18,12 @@ export type RunSpec = z.infer<typeof runSpecSchema>;
 export type WriteScope = RunSpec['writeScope'];
 export interface ScopeCheck { inputDigest: string; baselineDigest: string; candidateDigest: string; violations: string[] }
 export const modelBudgetSchema = z.object({ maxModelAttempts: z.number().int().min(0).max(1000) }).strict();
-export const autonomySchema = z.object({ integration: z.literal('on-gate-pass') }).strict();
+export const autonomySchema = z.object({ integration: z.literal('on-gate-pass'), conflicts: z.literal('resolve').optional() }).strict();
 export type AutonomyPolicy = z.infer<typeof autonomySchema>;
 export interface AutomaticIntegration {
   id: string; runId: string; inputDigest: string; candidateId: string;
   state: 'pending' | 'paused' | 'cancelled' | 'scheduled' | 'failed';
-  integrationId?: string; reason?: string;
+  integrationId?: string; resolutionRunId?: string; reason?: string;
 }
 export interface ModelBudgetStatus {
   rootRunId: string; revision: number; maxModelAttempts: number; reservedModelAttempts: number;

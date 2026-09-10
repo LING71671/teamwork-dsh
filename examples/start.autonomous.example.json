@@ -6,5 +6,5 @@
     "writeScope": { "files": [], "trees": ["."] }
   },
   "budget": { "maxModelAttempts": 200 },
-  "autonomy": { "integration": "on-gate-pass" }
+  "autonomy": { "integration": "on-gate-pass", "conflicts": "resolve" }
 }

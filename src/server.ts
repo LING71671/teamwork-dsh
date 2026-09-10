@@ -87,7 +87,7 @@ export async function serve(runtime: Runtime, token: string, port = 0): Promise<
     if (req.method === 'GET' && url.pathname === '/v1/hello') {
       json(res, 200, { protocolVersion, features: ['start', 'status', 'cancel', 'pause', 'resume', 'revise', 'revision-context', 'checkpoint', 'submit', 'events', 'review-gate', 'structured-requirements', 'write-scope', 'bounded-repair', 'candidate-recovery', 'artifacts', 'changes', 'integration-preview', 'integration-status',
         'model-attempt-budget', 'budget-increase',
-        ...(runtime.integrationEnabled ? ['integrate', 'integration-cancel', 'integration-keep-current', 'integration-resolve', 'resolution-context', 'automatic-integration'] : [])],
+        ...(runtime.integrationEnabled ? ['integrate', 'integration-cancel', 'integration-keep-current', 'integration-resolve', 'resolution-context', 'automatic-integration', 'automatic-conflict-resolution'] : [])],
         modelAttemptBudget: { enforcement: 'durable-pre-dispatch-reservation', sharedAcrossDescendants: true, tokenAccounting: false, monetaryAccounting: false },
         verificationEnabled: runtime.verificationEnabled,
         integrationEnabled: runtime.integrationEnabled,

@@ -13,7 +13,7 @@ import { validateCommand } from './validation.js';
 import { integrationPreview } from './integration-preview.js';
 import { IntegrationEngine } from './integration-engine.js';
 import { integrationRequest, integrationStatus } from './integration-journal.js';
-import { resolveIntegration } from './resolution.js';
+import { resolveIntegration, automaticResolutionInstructions } from './resolution.js';
 import { reviseRun } from './revision.js';
 
 export interface RuntimeOptions {
@@ -56,6 +56,7 @@ export class Runtime {
   start(input: StartCommand): Run {
     if (this.closing) throw new Fault('UNAVAILABLE', 'Runtime is shutting down or an owned process is unconfirmed', 503);
     if (input.autonomy && (!this.integrationEnabled || !this.verificationEnabled || !input.spec)) throw new Fault('AUTONOMY_NOT_AVAILABLE', 'Automatic integration requires operator-enabled integration/verification and an explicit write scope', 422);
+    if (input.autonomy?.conflicts === 'resolve' && !input.budget) throw new Fault('AUTONOMY_BUDGET_REQUIRED', 'Autonomous conflict resolution requires a shared finite model-attempt budget', 422);
     if (this.integrationEnabled && !this.activeIntegration && !this.store.integrations.pending().length && this.store.integrations.unresolved()) {
       throw new Fault('INTEGRATION_RECONCILIATION_REQUIRED', 'Resolve the retained integration before starting more work');
     }
@@ -69,7 +70,10 @@ export class Runtime {
     return run;
   }
   control(id: string, input: Exclude<ControlCommand, ReviseCommand>): Run {
+    const replay = this.store.replayControl(id, input); if (replay) return replay;
     if (input.type === 'budget') return this.store.increaseBudget(id, input);
+    const derived = this.store.get(id).automaticIntegration?.resolutionRunId;
+    if (derived) throw new Fault('DERIVED_CONTROL_REQUIRED', `Follow the automatic resolution Run ${derived} for progress and control; this parent no longer owns the active attempt`);
     if (this.store.get(id).integration && ['cancel', 'pause'].includes(input.type)) {
       const integration = this.store.get(id).integration!;
       if (['prepared', 'applying', 'snapshotting', 'validating'].includes(integration.phase)) {
@@ -92,6 +96,7 @@ export class Runtime {
     if (this.closing) throw new Fault('UNAVAILABLE', 'Runtime is shutting down or an owned process is unconfirmed', 503);
     const old = this.store.replayRevision(id, input); if (old) return old;
     if (input.autonomy && (!this.integrationEnabled || !this.verificationEnabled)) throw new Fault('AUTONOMY_NOT_AVAILABLE', 'Automatic integration requires operator-enabled integration/verification', 422);
+    if (input.autonomy?.conflicts === 'resolve' && !this.store.get(id).budget) throw new Fault('AUTONOMY_BUDGET_REQUIRED', 'Autonomous conflict resolution requires an existing shared finite budget', 422);
     if (this.activeIntegration) throw new Fault('INTEGRATION_BUSY', 'Wait for the integration writer to stop');
     const task = reviseRun(this.store, this.options.source, this.options.attemptsDirectory, id, input,
       AbortSignal.any([signal, this.shutdown.signal])).then(run => { queueMicrotask(() => this.pump()); return run; }).catch(error => {
@@ -242,23 +247,42 @@ export class Runtime {
         this.store.finishAutomatic(id, { reason: 'AUTOMATIC_AUTHORIZATION_STALE' }); return;
       }
       const request = { commandId: `automatic:${id}`, digest: digest(JSON.stringify(['automatic-integration', id, intent.runId, intent.inputDigest, intent.candidateId])) };
-      let integrationId: string;
+      const clearedRequest = { commandId: `automatic-clear:${id}`, digest: digest(JSON.stringify(['automatic-cleared-integration', id, intent.inputDigest])) };
+      let integrationId: string, resolutionRunId: string | undefined;
       try {
-        const existing = this.store.integrations.replay(request) ?? this.store.integrations.forRun(run.id).reverse().find(job =>
+        const existing = this.store.integrations.replay(clearedRequest) ?? this.store.integrations.replay(request) ?? this.store.integrations.forRun(run.id).reverse().find(job =>
           job.authorized && job.gateInputDigest === intent.inputDigest && job.candidate.artifactId === intent.candidateId);
         if (existing) integrationId = existing.id;
         else {
           const plan = await integrationPreview(this.store, this.options.source, run.id, undefined, 0, 1, undefined, signal);
           integrationId = (await new IntegrationEngine(this.store, this.options.source).prepare(run.id, plan.revision, plan.id, signal, request)).id;
         }
+        const integration = this.store.integrations.get(integrationId);
+        if (integration.phase === 'conflict' && run.autonomy.conflicts === 'resolve') {
+          if (integration.resolutionRunId) {
+            resolutionRunId = integration.resolutionRunId;
+          } else {
+            // Pause/revision can revoke the intent while read-only preparation is in flight.
+            if (this.store.automatic(id).state !== 'pending') return;
+            const plan = await integrationPreview(this.store, this.options.source, run.id, undefined, 0, 1, undefined, signal);
+            if (plan.status === 'clear') {
+              integrationId = (await new IntegrationEngine(this.store, this.options.source).prepare(run.id, plan.revision, plan.id, signal, clearedRequest)).id;
+            } else {
+              await resolveIntegration(this.store, this.options.source, this.options.attemptsDirectory, this.options.executionProfile, run.id, integration.id,
+                { commandId: `automatic-resolution:${id}`, type: 'resolve', expectedRevision: integration.revision, planId: plan.id,
+                  instructions: automaticResolutionInstructions }, signal, id);
+              return; // Child/outbox/receipt and parent linkage commit atomically.
+            }
+          }
+        }
       } catch (error) {
         if (signal.aborted || this.store.automatic(id).state !== 'pending') return;
-        if (retry < 2 && error instanceof Fault && ['REVISION_CONFLICT', 'INTEGRATION_PLAN_STALE'].includes(error.code)) continue;
+        if (retry < 2 && error instanceof Fault && ['REVISION_CONFLICT', 'INTEGRATION_PLAN_STALE', 'CONFLICTS_CLEARED'].includes(error.code)) continue;
         this.store.finishAutomatic(id, { reason: error instanceof Fault ? error.code : 'AUTOMATIC_PREPARATION_FAILED' }); return;
       }
       // Bookkeeping failure after the write journal commits is not a preparation refusal.
       // Leave the durable intent/receipt recoverable and stop scheduling until reopen.
-      this.store.finishAutomatic(id, { integrationId }); return;
+      this.store.finishAutomatic(id, { integrationId, ...(resolutionRunId ? { resolutionRunId } : {}) }); return;
     }
   }
   private async execute(run: Run, token: string, abort: AbortController): Promise<void> {

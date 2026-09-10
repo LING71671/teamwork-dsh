@@ -4,6 +4,8 @@ import { Fault, type Candidate, type IntegrationPlan, type TreeEntry, type TreeM
   type IntegrationPhase, type IntegrationStatus, type IntegrateCommand, type CancelCommand, type AbandonIntegrationCommand, type ResolveIntegrationCommand, type Run } from './contracts.js';
 
 export interface IntegrationRequest { commandId: string; digest: string }
+export const automaticResolutionRequest = (id: string): IntegrationRequest => ({ commandId: `automatic-resolution:${id}`,
+  digest: createHash('sha256').update(JSON.stringify(['automatic-resolution', id])).digest('hex') });
 export const integrationRequest = (runId: string, command: IntegrateCommand | CancelCommand | AbandonIntegrationCommand | ResolveIntegrationCommand, id?: string): IntegrationRequest => ({ commandId: command.commandId,
   digest: createHash('sha256').update(JSON.stringify(['integration', runId, command.type, command.expectedRevision, command.type === 'integrate' ? command.planId : id,
     ...(command.type === 'abandon' ? [command.targetDigest, command.reason] : command.type === 'resolve' ? [command.planId, command.instructions] : [])])).digest('hex') });
@@ -134,8 +136,8 @@ export class IntegrationJournal {
       this.receipt(request, next); return next;
     });
   }
-  resolve(runId: string, id: string, command: ResolveIntegrationCommand, create: () => Run): Run {
-    const request = integrationRequest(runId, command, id);
+  resolve(runId: string, id: string, command: ResolveIntegrationCommand, create: () => Run, requestOverride?: IntegrationRequest): Run {
+    const request = requestOverride ?? integrationRequest(runId, command, id);
     return this.transaction(() => {
       const record = this.get(id);
       if (record.runId !== runId) throw new Fault('NOT_FOUND', 'Integration is not in this run', 404);

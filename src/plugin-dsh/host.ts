@@ -11,16 +11,16 @@ export function apply(ctx: Context): void {
   const client = clientFromEnvironment(false);
   // Registration only: a reload never starts work or owns the background Runtime.
   ctx.tools.register(tool('teamwork_start',
-    'Start a coding attempt in an independent workspace. Only call for user-authorized work. Optional autonomy {integration:"on-gate-pass"} records upfront authorization to automatically integrate after Gate and independently validate the final merged tree; requires explicit spec and operator-enabled integration. Do not add this grant without user authorization. Omission is candidate-only/manual writeback. Optional budget {maxModelAttempts} limits total implementation/review launches shared across repairs, resumes, specification revisions and descendants; zero pauses before the first launch, omission has no aggregate model-attempt limit. This is not token/cost accounting. Optional spec contains requirements [{id,text}] and writeScope {files,trees}: exact file paths and literal directory subtrees ("." means the ordinary project), not globs; empty lists prohibit changes. Preserve the user-authorized scope and budget, never widen them on your own. Without spec, requirements are empty and scope is the ordinary project. Reuse commandId on network retries. Returns immediately; submitted is NOT verified success.',
+    'Start a coding attempt in an independent workspace. Only call for user-authorized work. Optional autonomy {integration:"on-gate-pass"} records upfront authorization to automatically integrate after Gate and independently validate the final merged tree; requires explicit spec and operator-enabled integration. Do not add this grant without user authorization. Omission is candidate-only/manual writeback. Add autonomy.conflicts="resolve" only when the upfront grant includes autonomous reconciliation and a finite shared budget is provided. It then creates independently reviewed resolution children within the inherited scope; follow automaticIntegration.resolutionRunId for their status and control. Optional budget {maxModelAttempts} limits total implementation/review launches shared across repairs, resumes, specification revisions and descendants; zero pauses before the first launch, omission has no aggregate model-attempt limit. This is not token/cost accounting. Optional spec contains requirements [{id,text}] and writeScope {files,trees}: exact file paths and literal directory subtrees ("." means the ordinary project), not globs; empty lists prohibit changes. Preserve the user-authorized scope and budget, never widen them on your own. Without spec, requirements are empty and scope is the ordinary project. Reuse commandId on network retries. Returns immediately; submitted is NOT verified success.',
     object({ commandId: string, objective: string, spec: object({
       requirements: { type: 'array', items: object({ id: string, text: string }) },
       writeScope: object({ files: { type: 'array', items: string }, trees: { type: 'array', items: string } }),
     }), budget: object({ maxModelAttempts: { type: 'integer' } }),
-      autonomy: object({ integration: { type: 'string', enum: ['on-gate-pass'] } }) }, ['commandId', 'objective']), async (args, exec) => {
+      autonomy: object({ integration: { type: 'string', enum: ['on-gate-pass'] }, conflicts: { type: 'string', enum: ['resolve'] } }, ['integration']) }, ['commandId', 'objective']), async (args, exec) => {
       await client.hello(exec.signal);
       return client.start(startSchema.parse(args), exec.signal);
     }));
-  ctx.tools.register(tool('teamwork_status', 'Read authoritative run status and independent review/command evidence. verified means the candidate passed configured acceptance, NOT integrated. Only integration.phase succeeded means its final merged snapshot passed final acceptance. gate not_evaluated means no acceptance yet.',
+  ctx.tools.register(tool('teamwork_status', 'Read authoritative run status and independent review/command evidence. verified means the candidate passed configured acceptance, NOT integrated. Only integration.phase succeeded means its final merged snapshot passed final acceptance. gate not_evaluated means no acceptance yet. automaticIntegration.resolutionRunId points to the active/finished conflict-resolution child; follow that Run (and further descendants) for progress and control, because the parent retains its historical conflict state.',
     object({ runId: string }), async (args, exec) => {
       const { runId } = z.object({ runId: identifier }).strict().parse(args);
       return client.status(runId, exec.signal);
@@ -46,7 +46,7 @@ export function apply(ctx: Context): void {
     object({ runId: string, commandId: string, expectedRevision: { type: 'integer' }, type: { type: 'string', enum: ['cancel', 'pause', 'resume', 'revise', 'budget'] },
       expectedBudgetRevision: { type: 'integer' }, maxModelAttempts: { type: 'integer' },
       mode: { type: 'string', enum: ['drain', 'interrupt'] }, objective: string, reason: string,
-      autonomy: object({ integration: { type: 'string', enum: ['on-gate-pass'] } }),
+      autonomy: object({ integration: { type: 'string', enum: ['on-gate-pass'] }, conflicts: { type: 'string', enum: ['resolve'] } }, ['integration']),
       spec: object({ requirements: { type: 'array', items: object({ id: string, text: string }) },
         writeScope: object({ files: { type: 'array', items: string }, trees: { type: 'array', items: string } }) }),
     }, ['runId', 'commandId', 'expectedRevision', 'type']),

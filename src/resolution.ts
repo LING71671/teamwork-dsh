@@ -2,16 +2,18 @@ import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { Fault, type ResolveIntegrationCommand, type Run } from './contracts.js';
 import type { Store } from './store.js';
-import { integrationRequest } from './integration-journal.js';
+import { integrationRequest, automaticResolutionRequest } from './integration-journal.js';
 import { planIntegration } from './integration.js';
 import { snapshot, sourceManifest, treeManifest } from './workspace.js';
+
+export const automaticResolutionInstructions = 'Reconcile the proposed change with current user changes within the original objective and write scope. Preserve unrelated user content. Read base, proposal and current references; do not broaden requirements, restore backups or overwrite conflicts blindly. Submit a fresh candidate for independent review and acceptance.';
 
 /** Prepare all three immutable inputs before atomically publishing the child WorkItem/outbox.
  * The workspace starts from CURRENT, not from the conflicting proposal. The resolver and fresh
  * reviewer inspect proposal/base through scoped read-only context tools, never shared writable trees. */
 export async function resolveIntegration(store: Store, source: string, attempts: string, profile: unknown, parentId: string,
-  integrationId: string, input: ResolveIntegrationCommand, signal: AbortSignal): Promise<Run> {
-  const request = integrationRequest(parentId, input, integrationId), old = store.integrations.replay<Run>(request);
+  integrationId: string, input: ResolveIntegrationCommand, signal: AbortSignal, automaticId?: string): Promise<Run> {
+  const request = automaticId ? automaticResolutionRequest(automaticId) : integrationRequest(parentId, input, integrationId), old = store.integrations.replay<Run>(request);
   if (old) return old;
   const job = store.integrations.get(integrationId), parent = store.get(parentId);
   if (job.runId !== parentId) throw new Fault('NOT_FOUND', 'Integration is not in this run', 404);
@@ -20,7 +22,8 @@ export async function resolveIntegration(store: Store, source: string, attempts:
   if (parent.phase !== 'verified' || parent.gate !== 'passed' || !parent.baseline || !parent.candidate || !parent.verification) throw new Fault('INTEGRATION_NOT_VERIFIED', 'Resolution needs the original verified candidate');
   if (job.gateInputDigest !== parent.order.inputDigest || job.candidate.artifactId !== parent.candidate.artifactId) throw new Fault('INTEGRATION_GATE_STALE', 'This integration belongs to an older specification/candidate');
   if (store.integrations.unresolved()) throw new Fault('INTEGRATION_RECONCILIATION_REQUIRED', 'Resolve retained integration ownership first');
-  const requirements = [...(parent.order.resolution?.requirements ?? []), input.instructions];
+  const inherited = parent.order.resolution?.requirements ?? [];
+  const requirements = automaticId && inherited.includes(input.instructions) ? inherited : [...inherited, input.instructions];
   if (requirements.join('\n').length > 32_000) throw new Fault('RESOLUTION_BUDGET', 'Inherited resolution requirements exceed the 32,000-character budget');
   const base = await treeManifest(parent.baseline.workspace, signal), proposal = await treeManifest(parent.candidate.workspace, signal);
   if (base.digest !== parent.baseline.digest || proposal.digest !== parent.candidate.digest) throw new Fault('ARTIFACT_CHANGED', 'Resolution input changed');
@@ -41,5 +44,5 @@ export async function resolveIntegration(store: Store, source: string, attempts:
       acceptance: job.validation.map(result => ({ commandId: result.commandId, status: result.status, exitCode: result.exitCode,
         stdoutTail: result.stdoutTail.slice(-1000), stderrTail: result.stderrTail.slice(-1000) })) }).slice(0, 16_000),
     inputs: { base: parent.baseline, proposal: parent.candidate, current: { workspace: directory, digest: frozen.digest } },
-    conflicts: plan.changes.filter(c => c.disposition === 'conflict') });
+    conflicts: plan.changes.filter(c => c.disposition === 'conflict') }, automaticId);
 }

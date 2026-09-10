@@ -2,7 +2,9 @@
 
 ## 0.3.0-dev.1 — Unreleased
 
-- Upfront `autonomy.integration: on-gate-pass` authorizes automatic Gate-controlled writeback within an explicit scope. Durable Gate/intent transaction, preflight, worker drain, existing journal/final acceptance, pause/cancel, restart deduplication and renewed revision grants are wired. No second integration command is needed. Conflicting files still require resolution; autonomous resolution dispatch and multi-day soak remain unfinished.
+- Upfront `autonomy.conflicts: resolve` plus a finite shared model-attempt budget enables automatic conflict-resolution descendants. Current/base/proposal snapshots, inherited scope/policy, independent review and subsequent automatic writeback are retained. Child/outbox/parent linkage/receipt commit atomically; repeated conflicts share quota and deduplicate the fixed inherited resolution instruction. Cleared conflicts are replanned without another model. Pauses revoke uncommitted resolution authority; manual resolution races reuse one child. Real four-process DSH flow and SQLite reopen are covered.
+
+- Upfront `autonomy.integration: on-gate-pass` authorizes automatic Gate-controlled writeback within an explicit scope. Durable Gate/intent transaction, preflight, worker drain, existing journal/final acceptance, pause/cancel, restart deduplication and renewed revision grants are wired. No second integration command is needed. Conflicting files require independently verified resolution, not blind overwrite; multi-day soak remains unfinished.
 
 - Opt-in bounded repair (1–5 total rounds) from the prior verified-digest candidate, with fresh attempts, credentials and incremented epochs.
 - Durable repair outbox, failed-round evidence history, bounded untrusted feedback, stale-result rejection and repair cancellation/restart handling.
@@ -31,7 +33,7 @@
 - Scoped revision references expose only registered available prior base/proposal and frozen current content. Missing/damaged old references are explicitly unavailable; subsequent tampering blocks new validation. Historical artifact changes/previews use the original version's baseline.
 - Legacy artifact metadata resolves its baseline through archived attempt identities; untraceable evidence is rejected. Artifact registry failures abort revision without a receipt instead of being silently downgraded to missing references.
 - Optional shared model-attempt budget through DSH/HTTP. SQLite reserves before executor creation; implementation/review, repair/resume, spec revisions and resolution descendants consume the same root allocation automatically. Exhaustion pauses; unknown/failed launches retain reservations. Root-only exception allocations use a separate budget revision and do not implicitly resume stopped work. This is not token/money/wall-clock accounting or a per-step approval requirement.
-- 195 tests locally, including actual DSH revision → reference tools → independent per-requirement review → explicit integration, plus transitive invalidation, stale credentials/Gate, narrowed scope, rollback, history-aware inspection and queued SQLite recovery. Not part of v0.2.0-dev.1.
+- 207 tests locally, including actual DSH revision → reference tools → independent per-requirement review → explicit integration, plus transitive invalidation, stale credentials/Gate, narrowed scope, rollback, history-aware inspection and queued SQLite recovery. Not part of v0.2.0-dev.1.
 
 ## 0.2.0-dev.1 — 2026-09-08
 
