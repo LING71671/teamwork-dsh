@@ -5,6 +5,7 @@ import { Runtime } from './runtime.js';
 import { Fault, protocolVersion, startSchema, controlSchema, bridgeSchema, pageSchema, filePageSchema, changePageSchema, integrationPageSchema,
   integrateSchema, cancelSchema, abandonIntegrationSchema, resolveIntegrationSchema, contextQuerySchema, workflowControlSchema, type ContextResult } from './contracts.js';
 import { artifactManifest, artifactFile, artifactChanges } from './artifacts.js';
+import { shutdownSchema, type ServiceManagement } from './service-contracts.js';
 
 async function body(req: IncomingMessage): Promise<unknown> {
   if (!req.headers['content-type']?.startsWith('application/json')) throw new Fault('CONTENT_TYPE', 'Use application/json', 415);
@@ -27,8 +28,9 @@ const json = (res: ServerResponse, status: number, value: unknown): void => {
   res.end(JSON.stringify(value));
 };
 
-export async function serve(runtime: Runtime, token: string, port = 0): Promise<{ url: string; close(): Promise<void> }> {
+export async function serve(runtime: Runtime, token: string, port = 0, management?: ServiceManagement): Promise<{ url: string; close(): Promise<void> }> {
   if (token.length < 32) throw new Fault('CONFIG_INVALID', 'Host token must be at least 32 characters', 400);
+  if (management && (management.token.length < 32 || equal(management.token, token))) throw new Fault('CONFIG_INVALID', 'Management requires a separate operator credential', 400);
   const streams = new Set<ServerResponse>();
   let inspections = 0;
   async function inspect<T>(res: ServerResponse, body: (signal: AbortSignal) => Promise<T>): Promise<T> {
@@ -60,6 +62,13 @@ export async function serve(runtime: Runtime, token: string, port = 0): Promise<
     }
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     const auth = req.headers.authorization?.match(/^Bearer ([^\s]+)$/)?.[1] ?? '';
+    if (url.pathname === '/v1/runtime' || url.pathname === '/v1/runtime/commands') {
+      if (!management || !equal(auth, management.token)) throw new Fault('UNAUTHORIZED', 'Operator credential required', 401);
+      if (url.search) throw new Fault('SCHEMA_INVALID', 'Runtime management routes do not accept query parameters', 400);
+      if (req.method === 'GET' && url.pathname === '/v1/runtime') { json(res, 200, management.status()); return; }
+      if (req.method === 'POST' && url.pathname.endsWith('/commands')) { json(res, 202, management.stop(shutdownSchema.parse(await body(req)))); return; }
+      throw new Fault('NOT_FOUND', 'Unknown runtime management route', 404);
+    }
     const context = /^\/v1\/attempts\/([a-zA-Z0-9_-]+)\/context$/.exec(url.pathname);
     if (context && req.method === 'GET') {
       const attemptId = context[1]!, scope = runtime.store.contextScope(attemptId, auth);

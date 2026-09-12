@@ -16,6 +16,7 @@ import { IntegrationEngine } from './integration-engine.js';
 import { integrationRequest, integrationStatus } from './integration-journal.js';
 import { resolveIntegration, automaticResolutionInstructions } from './resolution.js';
 import { reviseRun } from './revision.js';
+import type { Lifecycle, ShutdownCommand, ShutdownReceipt } from './service-contracts.js';
 
 export interface RuntimeOptions {
   source: string;
@@ -25,6 +26,7 @@ export interface RuntimeOptions {
   executionProfile: unknown;
   verification?: VerificationPolicy;
   integration?: IntegrationPolicy;
+  lifecycle?: Lifecycle;
 }
 interface Active { abort: AbortController; done: Promise<void> }
 
@@ -42,12 +44,15 @@ export class Runtime {
   get verificationEnabled(): boolean { return this.options.verification !== undefined; }
   get integrationEnabled(): boolean { return this.options.integration?.enabled === true; }
   get maxIterations(): number { return this.options.verification?.maxIterations ?? 1; }
+  get connected(): boolean { return this.url !== ''; }
+  get dispatchStopped(): boolean { return this.closing; }
   previewIntegration(id: string, artifactId: string | undefined, offset: number, limit: number, planId: string | undefined, signal: AbortSignal) {
     return integrationPreview(this.store, this.options.source, id, artifactId, offset, limit, planId, signal);
   }
   connect(url: string): void {
     this.store.bindProfile({ source: this.options.source, attemptsDirectory: this.options.attemptsDirectory,
       executionProfile: this.options.executionProfile,
+      ...(this.options.lifecycle ? { lifecycle: this.options.lifecycle } : {}),
       ...(this.integrationEnabled ? { integration: { enabled: true } } : {}),
       ...(this.options.verification ? { verification: this.options.verification } : {}) });
     this.url = url;
@@ -61,7 +66,7 @@ export class Runtime {
     if (this.integrationEnabled && !this.activeIntegration && !this.store.integrations.pending().length && this.store.integrations.unresolved()) {
       throw new Fault('INTEGRATION_RECONCILIATION_REQUIRED', 'Resolve the retained integration before starting more work');
     }
-    const run = this.store.start(input, this.options.attemptsDirectory, this.options.executionProfile, this.options.verification);
+    const run = this.store.start(input, this.options.attemptsDirectory, this.options.executionProfile, this.options.verification, this.options.lifecycle);
     queueMicrotask(() => this.pump());
     return run;
   }
@@ -446,6 +451,29 @@ export class Runtime {
     await this.checkContext(run, signal);
     if (intact) await this.checkScope(run, candidate, signal);
     this.store.finishGate(run.id, results, intact, acceptanceIntegrity);
+  }
+  activity(): { activeRunIds: string[]; activeIntegrationId?: string } {
+    return { activeRunIds: [...this.active.keys()], ...(this.activeIntegration ? { activeIntegrationId: this.activeIntegration.id } : {}) };
+  }
+  requestShutdown(input: ShutdownCommand): ShutdownReceipt {
+    const receipt = this.store.requestShutdown(input);
+    this.closing = true;
+    this.shutdown.abort();
+    for (const [id, active] of this.active) {
+      const run = this.store.get(id);
+      if (run.phase === 'stopping' || (run.phase === 'pausing' && run.pause?.mode === 'interrupt')) active.abort.abort();
+    }
+    if (this.activeIntegration && this.store.integrations.get(this.activeIntegration.id).cancelRequested) this.activeIntegration.abort.abort();
+    return receipt;
+  }
+  async waitForShutdown(): Promise<void> {
+    if (!this.closing) throw new Fault('SHUTDOWN_NOT_REQUESTED', 'Request shutdown before waiting');
+    await Promise.allSettled([...this.preparation]);
+    await this.automaticPreparation;
+    await Promise.all([...this.active.values()].map(a => a.done).concat(this.activeIntegration ? [this.activeIntegration.done] : []));
+    if (this.store.all().some(run => run.phase === 'blocked') || this.store.all().some(run => this.store.integrations.forRun(run.id).some(job => job.commandIntent))) {
+      throw new Fault('EXTERNAL_STATE_UNKNOWN', 'Retain ownership: an execution lacks confirmed exit evidence');
+    }
   }
   async close(): Promise<void> {
     this.closing = true;

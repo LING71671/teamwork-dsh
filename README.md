@@ -11,6 +11,7 @@ A portable teamwork orchestration runtime, with DeepSeek Harness (DSH) as its fi
 - Host 工具：`teamwork_start`、`teamwork_status`、`teamwork_control`（取消；0.3 还支持暂停、恢复和显式需求修订）。
 - 0.3 的 `teamwork_inspect` 提供摘要校验后的产物分页读取、变更清单，以及针对当前项目的只读三方集成冲突预览。
 - 独立 Runtime：SQLite 状态、幂等命令、dispatch outbox、可补读的 SSE 事件。
+- 0.3 提供 `teamwork-runtime start` 持久后台模式：启动终端与 DSH 入口断开后继续授权工作。默认 `run` 为 attached 模式，拥有者退出后暂停；`status` / `stop` 使用独立操作者凭证和实例 ID，不靠 PID 猜测或强杀服务。
 - 每个 Attempt 使用独立工作副本、DSH SDK 进程和作用域凭证；支持超时与取消。
 - 可选验证：候选内容摘要 → 全新只读评审 → 独立验收命令 → 确定性 Gate。
 - 0.3 的 start 支持结构化需求及文件/目录变更范围；评审逐项回答需求，Runtime 检查范围并拒绝越界候选。
@@ -36,7 +37,7 @@ npm ci --registry=https://registry.npmjs.org
 npm test
 ```
 
-`v0.2.0-dev.1` 有 35 项测试，当前 0.3 工作树有 207 项。`npm test` 会构建源码并执行测试，包括真实 DSH SDK/Cordis 的离线模型适配器、逐项需求评审与变更范围、需求修订与旧证据失效、三方冲突解决后独立验证、显式集成到临时项目、保留用户改动、最终验收，以及进程退出恢复；不需要 API key，也不验证真实模型的任务效果。
+`v0.2.0-dev.1` 有 35 项测试，当前 0.3 工作树有 243 项。`npm test` 会构建源码并执行测试，包括真实 DSH SDK/Cordis 的离线模型适配器、逐项需求评审与变更范围、需求修订与旧证据失效、三方冲突解决后独立验证、显式集成到临时项目、保留用户改动、最终验收，以及进程退出恢复；不需要 API key，也不验证真实模型的任务效果。
 
 编辑 `examples/runtime.example.json` 中的绝对路径和 DSH 模型路由，按实际位置修改 `examples/host.cordis.patch.yml`。示例路径仅为占位，不会替换你的凭据。
 

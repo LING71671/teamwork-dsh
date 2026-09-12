@@ -16,7 +16,7 @@ npm ci --registry=https://registry.npmjs.org
 npm test
 ```
 
-目前有 227 项自动化测试。真实 DSH 测试覆盖单实现者、完整评审/Gate、结构化需求逐项评审、四进程需求修订与失败修复链，以及“checkpoint → 中断并确认退出 → 新实现者 → 新评审 → 验收”三进程恢复链；离线 LLM adapter 调用真实工具，不发送网络模型请求、不需要 API key。显式集成测试进一步将真实 DSH 的候选写回临时项目，保留期间新增的用户文件并重新验收；冲突链覆盖读取三方内容、产生新候选、独立评审、再次显式集成。其他测试覆盖去重、身份/版本拒绝、候选和上下文篡改、读取凭证撤销、失败/超时/输入改写、暂停竞态、重载、产物权限与分页、三方冲突、SQLite 恢复、真实子进程退出边界、取消、保留当前文件、需求修订与后代失效、历史基线、新工作项事务回滚、越界变更与漏评/重复需求 ID。新增整条任务链控制测试覆盖聚合版本、父子 hold、共享预算耗尽、取消隔离、事务回滚、最终写回中断/排空和持久恢复。这不等同于真实模型效果或多天连续运行验收。
+目前有 243 项自动化测试。真实 DSH 测试覆盖单实现者、完整评审/Gate、结构化需求逐项评审、四进程需求修订与失败修复链，以及“checkpoint → 中断并确认退出 → 新实现者 → 新评审 → 验收”三进程恢复链；离线 LLM adapter 调用真实工具，不发送网络模型请求、不需要 API key。显式集成测试进一步将真实 DSH 的候选写回临时项目，保留期间新增的用户文件并重新验收；冲突链覆盖读取三方内容、产生新候选、独立评审、再次显式集成。其他测试覆盖去重、身份/版本拒绝、候选和上下文篡改、读取凭证撤销、失败/超时/输入改写、暂停竞态、重载、产物权限与分页、三方冲突、SQLite 恢复、真实子进程退出边界、取消、保留当前文件、需求修订与后代失效、历史基线、新工作项事务回滚、越界变更与漏评/重复需求 ID。整条任务链控制测试覆盖聚合版本、父子 hold、共享预算耗尽、取消隔离、事务回滚、最终写回中断/排空和持久恢复；新增 16 项生命周期测试覆盖 attached/persistent 的真实 DSH 进程、退出和暂停证据。这不等同于真实模型效果或多天连续运行验收。
 
 测试只使用临时 DSH_HOME，不修改用户 DSH profile。测试生成的临时副本和状态在结束后清理。
 
@@ -28,13 +28,38 @@ npm test
 # 仅检查版本和 SDK 初始化，不提交任务。
 npm start -- --config C:\work\teamwork-dsh\examples\runtime.example.json --doctor
 
-# 前台运行；Ctrl+C 关闭所拥有的执行进程，然后释放数据库。
+# 默认 attached：拥有者退出时暂停工作，确认退出后释放数据库 owner。
 npm start -- --config C:\work\teamwork-dsh\examples\runtime.example.json
+
+# 显式 persistent：启动命令返回后独立运行，终端/DSH 入口退出不停止已授权工作。
+npm start -- start --config C:\work\teamwork-dsh\examples\runtime.example.json
+
+# 查询独立服务（含 instanceId），不读取或打印模型凭据。
+npm start -- status --config C:\work\teamwork-dsh\examples\runtime.example.json
+
+# 停止整个 Runtime，不是取消某个任务。使用上一步真实 instanceId。
+npm start -- stop --config C:\work\teamwork-dsh\examples\runtime.example.json --instance-id <instanceId> --command-id stop-runtime-001 --mode drain
 ```
 
-Runtime 输出 loopback 地址和 `connection.json` 路径，不输出令牌。第一次调用 start 才运行模型；DSH 会按所选 profile 使用已有凭据。启动 DSH 本身可能按其常规行为初始化缺失的 profile；本插件不修改全局模型选择，也不注册系统服务。
+Runtime 输出实例 ID 和 `connection.json` 路径，不输出令牌。空数据目录在第一次 `teamwork_start` 后才运行模型；重启时仍会恢复已授权且未被暂停的待派发工作。DSH 会按所选 profile 使用已有凭据。启动 DSH 本身可能按其常规行为初始化缺失的 profile；本插件不修改全局模型选择，也不注册系统服务或开机启动项。
 
-一个数据目录只服务一个 workspace、固定执行 profile、验收策略和集成启用状态。更换 workspace/model/profile/verification 或启用 integration 时使用新的数据目录，避免旧队列被派往新的目标或改变原授权。运行期间不要修改 profile/overlay 文件和外部验收脚本；当前摘要记录配置值，不对这些外部文件做内容冻结。
+一个数据目录只服务一个 workspace、固定执行 profile、验收策略、集成启用状态及 CLI 生命周期。更换 workspace/model/profile/verification、启用 integration、切换 attached/persistent，或从未绑定生命周期的旧 CLI 数据目录升级时，使用新的数据目录；当前不自动迁移旧授权。不要因此删除旧状态/备份。运行期间不要修改 profile/overlay 文件和外部验收脚本；当前摘要记录配置值，不对这些外部文件做内容冻结。
+
+### Attached 与 persistent 的运行边界
+
+默认 `run` 的 CLI 进程是 attached 拥有者，Runtime 位于独立子进程，通过 IPC 感知拥有者退出，包括直接杀死拥有者的情况。断开后会记录全局暂停并请求中断当前执行，确认退出后固定 checkpoint/candidate。这里的拥有者是启动 `run` 的 CLI，不是任意连接它的 DSH 会话。`start` 启动 persistent 子进程，断开启动器或任何 DSH 入口都不会触发暂停；已有授权范围和共享预算仍适用。Run 保存生命周期，派生任务继承它。
+
+启动器使用隐藏窗口、分离进程与独立 stdio，并等待 IPC 就绪回执；不是只看 PID 存在就宣称启动成功。[Node.js 子进程文档](https://nodejs.org/docs/latest-v22.x/api/child_process.html#optionsdetached)。启动观测超时返回 STARTUP_UNCONFIRMED，不证明子进程已停止，不自动杀进程或再启动一份；先用 `status` 核对。重复启动遇到已有 owner 会拒绝。机器关机、睡眠、进程自身崩溃不在“入口断开后继续”的保证内，当前也没有崩溃后的自动重启/未知进程对账。
+
+`runtime-service.json` 仅供操作者管理，包含独立 operator token；host 插件只读取 `connection.json`，不会获得管理凭证，worker 凭证不能访问管理接口。二者都必须放在当前用户专用数据目录。管理 API 为 GET `/v1/runtime` 与 POST `/v1/runtime/commands`，不接受 browser Origin；stop 请求需要 `{type:"stop",instanceId,commandId,mode}`。实例 ID 防止旧终端误停替代服务；CLI 不对记录中的 PID 发信号。
+
+stop 的默认 drain 先在一个 SQLite 事务中保存所有根/后代暂停、阻止后续派发和自动写回，并记录唯一操作者回执；然后等待当前执行/最终写回正常排空。interrupt 请求立即停止已拥有的执行，可能留下部分写入和待核对集成。已有 drain 可用新的 commandId 升级到 interrupt，不能通过重复旧命令降级已请求的中断。CLI 的 Ctrl+C/attached 拥有者断开采用 interrupt。
+
+`accepted: true` 是停止请求回执，不是已停止；查询到 `stopped` 才表示执行退出已确认、HTTP/数据库已关闭，且 owner 已释放。关闭过程的端口/记录切换可能短暂返回 SERVICE_UNREACHABLE 或 SERVICE_TRANSITION，此时应继续查询同一实例，不能据此启动替代进程。未知 worker 或最终命令退出会保留 owner、管理入口与 blocked 状态。已停止但需要核对的部分集成仍保留文件、备份和 source lease；关闭服务不代表它通过验收。
+
+干净停止后重新启动同一模式可重新查询持久任务，但不会自动恢复人为暂停的任务树；需要时使用 `scope: workflow` 的 resume，保留已消耗预算和新 Attempt 身份。服务停止后 stop 重试报告 SERVICE_STOPPED；仍运行的服务对相同 commandId/内容重放原回执。`status` 在服务离线但无明确 stopped 记录时报告未知，不从 PID 不存在推导工作已安全停止。
+
+状态记录采用同目录临时文件的原子替换，不跟随链接、不就地截断；Windows 并发读取导致的短暂替换拒绝只对同一次元数据发布做有限重试，不重放模型工作或文件集成。生命周期测试包含真实 DSH、启动器退出、拥有者强制退出、观察超时、陈旧实例、事务失败和 SQLite 重开；这些短测仍不证明已连续自主运行数天。
 
 ## 启用独立评审与验收
 

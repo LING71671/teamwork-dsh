@@ -10,6 +10,9 @@ dist/
 .npmrc
 connection.json
 runtime.lock
+runtime-service.json
+.runtime-service.json-*.tmp
+.connection.json-*.tmp
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal

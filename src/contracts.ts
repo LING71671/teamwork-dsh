@@ -235,6 +235,7 @@ export interface RoundEvidence {
 }
 export interface Run {
   id: string;
+  lifecycle?: 'attached' | 'persistent';
   revision: number;
   phase: Phase;
   gate: 'not_evaluated' | 'passed' | 'failed';

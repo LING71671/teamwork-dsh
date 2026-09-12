@@ -10,6 +10,7 @@ import { Fault, terminal, type Run, type Event, type StartCommand, type CancelCo
 import { activityPhase, evaluateGate, receive, transition, repairEligible, repairFeedback } from './kernel.js';
 import { IntegrationJournal, integrationStatus, automaticResolutionRequest } from './integration-journal.js';
 import { workflowStatus, activeRun, activeIntegration } from './workflow.js';
+import { shutdownSchema, type ShutdownCommand, type ShutdownReceipt, type Lifecycle } from './service-contracts.js';
 
 export const digest = (value: string): string => createHash('sha256').update(value).digest('hex');
 function canonical(value: unknown): string {
@@ -189,6 +190,35 @@ export class Store {
     if (!row) throw new Fault('NOT_FOUND', 'Automatic integration intent does not exist', 404);
     return JSON.parse(row.data as string) as AutomaticIntegration;
   }
+  requestShutdown(input: ShutdownCommand): ShutdownReceipt {
+    input = shutdownSchema.parse(input);
+    return this.command(`operator:${input.commandId}`, input, () => {
+      const runs = this.all(), roots = runs.filter(run => !run.parentRunId && !run.order.resolution?.parentRunId);
+      for (const root of roots) {
+        const row = this.db.prepare('SELECT data FROM workflow_controls WHERE root_run_id=?').get(root.id);
+        const old = row ? JSON.parse(row.data as string) as WorkflowHold : undefined;
+        if (old?.mode !== 'cancelled') this.db.prepare('INSERT OR REPLACE INTO workflow_controls VALUES(?,?)')
+          .run(root.id, JSON.stringify({ rootRunId: root.id, revision: (old?.revision ?? 0) + 1, mode: 'paused' } satisfies WorkflowHold));
+      }
+      for (const member of runs) {
+        const run = this.get(member.id);
+        if ((!terminal(run.phase) && run.phase !== 'stopping') || (run.phase === 'verified' && run.automaticIntegration?.state === 'pending')) {
+          this.pauseCurrent(run.id, { type: 'pause', commandId: input.commandId, expectedRevision: run.revision,
+            mode: run.pause?.mode === 'interrupt' ? 'interrupt' : input.mode });
+        }
+        if (input.mode === 'interrupt') for (const job of this.integrations.forRun(run.id)) {
+          if (job.dispatch === 'claimed' && ['prepared', 'applying', 'snapshotting', 'validating'].includes(job.phase)) {
+            this.integrations.cancelWithinTransaction(run.id, job.id, job.revision);
+          }
+        }
+      }
+      for (const root of roots) {
+        const current = this.get(root.id);
+        this.save({ ...current, revision: current.revision + 1, updatedAt: new Date().toISOString() }, 'runtime.stop_requested');
+      }
+      return { accepted: true, instanceId: input.instanceId, commandId: input.commandId, mode: input.mode, rootRunIds: roots.map(run => run.id) };
+    });
+  }
   pendingAutomatic(): AutomaticIntegration[] {
     return this.db.prepare("SELECT data FROM automatic_integrations WHERE json_extract(data,'$.state')='pending' ORDER BY rowid")
       .all().map(row => JSON.parse(row.data as string) as AutomaticIntegration).filter(intent => !this.workflowHeld(intent.runId));
@@ -302,7 +332,7 @@ export class Store {
       return this.save(next, 'attempt.submitted');
     });
   }
-  start(input: StartCommand, workspace: string, executionProfile: unknown, verification?: VerificationPolicy): Run {
+  start(input: StartCommand, workspace: string, executionProfile: unknown, verification?: VerificationPolicy, lifecycle?: Lifecycle): Run {
     input = startSchema.parse(input);
     return this.command(`host:${input.commandId}`, { type: 'start', input }, () => {
       const id = randomUUID(), attemptId = randomUUID();
@@ -314,6 +344,7 @@ export class Store {
           ...(verification ? { verification } : {}), ...(input.budget ? { budget: input.budget } : {}), ...(input.autonomy ? { autonomy: input.autonomy } : {}) })),
         workspace: join(workspace, attemptId, 'work') };
       const run: Run = { id, revision: 0, phase: 'queued', gate: 'not_evaluated', order, iteration: 1, history: [], createdAt: at, updatedAt: at,
+        ...(lifecycle ? { lifecycle } : {}),
         ...(input.autonomy ? { autonomy: input.autonomy } : {}),
         ...(verification ? { verification } : {}), ...(input.budget ? { budget: { rootRunId: id, revision: 0,
           maxModelAttempts: input.budget.maxModelAttempts, reservedModelAttempts: 0 } } : {}) };
@@ -342,6 +373,7 @@ export class Store {
       const id = randomUUID(), attemptId = randomUUID(), at = new Date().toISOString();
       let run: Run = { id, revision: 0, phase: 'queued', gate: 'not_evaluated', iteration: 1, history: [], createdAt: at, updatedAt: at,
         verification: parent.verification, parentRunId: parent.id, ...(parent.budget ? { budget: parent.budget } : {}),
+        ...(parent.lifecycle ? { lifecycle: parent.lifecycle } : {}),
         ...(parent.autonomy ? { autonomy: parent.autonomy } : {}),
         order: { runId: id, workItemId: randomUUID(), attemptId, dispatchKey: randomUUID(), epoch: 1, specRevision: parent.order.specRevision + 1,
           objective: parent.order.objective, ...(parent.order.spec ? { spec: parent.order.spec } : {}),
